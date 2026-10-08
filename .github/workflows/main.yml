@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build APK
 
 on:
   push:
@@ -10,12 +10,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Java
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
 
       - name: Setup Flutter
@@ -23,15 +24,17 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Install Dependencies
+      - name: Create Android Files
+        run: flutter create . --platforms=android
+
+      - name: Get Dependencies
         run: flutter pub get
 
       - name: Build APK
         run: flutter build apk --release
 
       - name: Upload APK
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: radiant-novel-app-release
+          name: radiant-novel-app
           path: build/app/outputs/flutter-apk/app-release.apk
-          
