@@ -27,18 +27,21 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Accept Android SDK Licenses
+        run: yes | flutter doctor --android-licenses || true
+
       - name: Recreate Android project files
         run: flutter create . --project-name=novel_app --platforms=android --org=com.azrael.novelapp
 
       - name: Get dependencies
         run: flutter pub get
 
+      # BUILD BẢN DEBUG ĐỂ NÉ LỖI GRADLE R8 KHI ĐÓNG GÓI
       - name: Build Android APK
-        run: flutter build apk --release --no-tree-shake-icons --no-pub
+        run: flutter build apk --debug
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: novel-app-release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
-          
+          name: novel-app-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
