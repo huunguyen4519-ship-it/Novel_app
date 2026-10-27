@@ -1,40 +1,40 @@
-name: Build APK
+name: Build Android APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
   build:
+    name: Build Release APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      - name: Set up Java JDK
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: 'zulu'
           java-version: '17'
 
-      - name: Setup Flutter
+      - name: Set up Flutter SDK
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.22.x'
           channel: 'stable'
+          cache: true
 
-      - name: Create Android Files
-        run: flutter create . --platforms=android
-
-      - name: Get Dependencies
+      - name: Get dependencies
         run: flutter pub get
 
-      - name: Build APK
-        run: flutter build apk --release
+      - name: Build Android APK
+        run: flutter build apk --release --no-tree-shake-icons
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: radiant-novel-app
+          name: Novel-App-Release-APK
           path: build/app/outputs/flutter-apk/app-release.apk
