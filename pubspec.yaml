@@ -1,0 +1,25 @@
+name: novel_app
+description: "Novel App - Minimalist Liquid Glass Writing Workspace by azrael.!!!"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  provider: ^6.1.2
+  shared_preferences: ^2.2.3
+  path_provider: ^2.1.2
+  share_plus: ^9.0.0
+  google_fonts: ^6.2.1
+  flutter_staggered_grid_view: ^0.7.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
