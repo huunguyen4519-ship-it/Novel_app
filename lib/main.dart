@@ -29,7 +29,7 @@ class Note {
   });
 }
 
-// ================= QUẢN LÝ TRẠNG THÁI (PROVIDER) =================
+// ================= QUẢN LÝ TRẠNG THÁI =================
 class AppSettings extends ChangeNotifier {
   Color _themeColor = const Color(0xFFEF4444);
   bool _isGridMode = true;
@@ -247,7 +247,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          // QUẦNG SÁNG LIQUID GLASS MỜ MỊN (RADIAL GRADIENT)
+          // QUẦNG SÁNG RADIAL GRADIENT MỜ MỊN Lan Tỏa
           Positioned(
             top: -100,
             left: -100,
