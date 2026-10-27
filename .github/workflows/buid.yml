@@ -27,9 +27,9 @@ jobs:
           channel: 'stable'
           cache: true
 
-      # BƯỚC TỰ ĐỘNG TẠO BỘ KHUNG ANDROID CHUẨN
+      # ÉP FLUTTER DÙNG TÊN 'novel_app' VIẾT THƯỜNG HOÀN TOÀN
       - name: Recreate Android project files
-        run: flutter create . --platforms=android --org=com.azrael.novelapp
+        run: flutter create . --project-name=novel_app --platforms=android --org=com.azrael.novelapp
 
       - name: Get dependencies
         run: flutter pub get
@@ -40,5 +40,5 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: novel-App-Release-APK
+          name: novel-app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
