@@ -1,10 +1,7 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
   runApp(
     ChangeNotifierProvider(
       create: (context) => AppSettings(),
@@ -30,92 +27,38 @@ class Note {
     required this.words,
     required this.date,
   });
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'content': content,
-        'isPinned': isPinned,
-        'words': words,
-        'date': date,
-      };
-
-  factory Note.fromJson(Map<String, dynamic> json) => Note(
-        id: json['id'] ?? '',
-        title: json['title'] ?? '',
-        content: json['content'] ?? '',
-        isPinned: json['isPinned'] ?? false,
-        words: json['words'] ?? 0,
-        date: json['date'] ?? '',
-      );
 }
 
-// ================= QUẢN LÝ TRẠNG THÁI & LƯU TRỮ =================
+// ================= QUẢN LÝ TRẠNG THÁI (PROVIDER) =================
 class AppSettings extends ChangeNotifier {
   Color _themeColor = const Color(0xFFEF4444);
   bool _isGridMode = true;
   int _dailyGoal = 500;
-  List<Note> _notes = [];
+  List<Note> _notes = [
+    Note(
+      id: '1',
+      title: 'Ý tưởng tiểu thuyết mới',
+      content:
+          'Chào mừng bạn đến với ứng dụng Novel App! Nhấn nút cộng ở góc dưới để tạo bài viết mới hoặc nhấn vào bài này để chỉnh sửa.',
+      isPinned: true,
+      words: 32,
+      date: '27/10',
+    ),
+    Note(
+      id: '2',
+      title: 'Con đường của ánh sáng - Chương 1',
+      content:
+          'Arista Valerius đứng trên đỉnh ngọn đồi nhìn xuống thung lũng sương mù...',
+      isPinned: false,
+      words: 13,
+      date: '26/10',
+    ),
+  ];
 
   Color get themeColor => _themeColor;
   bool get isGridMode => _isGridMode;
   int get dailyGoal => _dailyGoal;
   List<Note> get notes => _notes;
-
-  AppSettings() {
-    _loadFromPrefs();
-  }
-
-  Future<void> _loadFromPrefs() async {
-    final prefs = await SharedPreferences.getInstance();
-    _dailyGoal = prefs.getInt('dailyGoal') ?? 500;
-    _isGridMode = prefs.getBool('isGridMode') ?? true;
-
-    final String? notesJson = prefs.getString('saved_notes');
-    if (notesJson != null && notesJson.isNotEmpty) {
-      try {
-        final List<dynamic> decoded = jsonDecode(notesJson);
-        _notes = decoded.map((item) => Note.fromJson(item)).toList();
-      } catch (e) {
-        _initDefaultNotes();
-      }
-    } else {
-      _initDefaultNotes();
-    }
-    notifyListeners();
-  }
-
-  void _initDefaultNotes() {
-    _notes = [
-      Note(
-        id: '1',
-        title: 'Ý tưởng tiểu thuyết mới',
-        content:
-            'Chào mừng bạn đến với ứng dụng Novel App! Nhấn nút cộng ở góc dưới để tạo bài viết mới hoặc nhấn vào bài này để chỉnh sửa.',
-        isPinned: true,
-        words: 32,
-        date: '27/10',
-      ),
-      Note(
-        id: '2',
-        title: 'Con đường của ánh sáng - Chương 1',
-        content:
-            'Arista Valerius đứng trên đỉnh ngọn đồi nhìn xuống thung lũng sương mù...',
-        isPinned: false,
-        words: 13,
-        date: '26/10',
-      ),
-    ];
-    _saveToPrefs();
-  }
-
-  Future<void> _saveToPrefs() async {
-    final prefs = await SharedPreferences.getInstance();
-    prefs.setInt('dailyGoal', _dailyGoal);
-    prefs.setBool('isGridMode', _isGridMode);
-    final String encoded = jsonEncode(_notes.map((n) => n.toJson()).toList());
-    prefs.setString('saved_notes', encoded);
-  }
 
   void setThemeColor(Color color) {
     _themeColor = color;
@@ -124,13 +67,11 @@ class AppSettings extends ChangeNotifier {
 
   void toggleGridMode() {
     _isGridMode = !_isGridMode;
-    _saveToPrefs();
     notifyListeners();
   }
 
   void setDailyGoal(int goal) {
     _dailyGoal = goal;
-    _saveToPrefs();
     notifyListeners();
   }
 
@@ -142,13 +83,11 @@ class AppSettings extends ChangeNotifier {
       _notes.insert(0, note);
     }
     _sortNotes();
-    _saveToPrefs();
     notifyListeners();
   }
 
   void deleteNote(String id) {
     _notes.removeWhere((n) => n.id == id);
-    _saveToPrefs();
     notifyListeners();
   }
 
@@ -157,7 +96,6 @@ class AppSettings extends ChangeNotifier {
     if (index >= 0) {
       _notes[index].isPinned = !_notes[index].isPinned;
       _sortNotes();
-      _saveToPrefs();
       notifyListeners();
     }
   }
@@ -309,15 +247,23 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       body: Stack(
         children: [
+          // QUẦNG SÁNG LIQUID GLASS MỜ MỊN (RADIAL GRADIENT)
           Positioned(
             top: -100,
             left: -100,
             child: Container(
-              width: 300,
-              height: 300,
+              width: 320,
+              height: 320,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: settings.themeColor.withOpacity(0.35),
+                gradient: RadialGradient(
+                  colors: [
+                    settings.themeColor.withOpacity(0.45),
+                    settings.themeColor.withOpacity(0.15),
+                    Colors.transparent,
+                  ],
+                  stops: const [0.0, 0.5, 1.0],
+                ),
               ),
             ),
           ),
