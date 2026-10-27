@@ -27,7 +27,6 @@ jobs:
           channel: 'stable'
           cache: true
 
-      # ÉP FLUTTER DÙNG TÊN 'novel_app' VIẾT THƯỜNG HOÀN TOÀN
       - name: Recreate Android project files
         run: flutter create . --project-name=novel_app --platforms=android --org=com.azrael.novelapp
 
@@ -35,10 +34,11 @@ jobs:
         run: flutter pub get
 
       - name: Build Android APK
-        run: flutter build apk --release --no-tree-shake-icons
+        run: flutter build apk --release --no-tree-shake-icons --no-pub
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: novel-app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+          
