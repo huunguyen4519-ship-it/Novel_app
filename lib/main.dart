@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 void main() {
   runApp(
@@ -14,15 +12,13 @@ void main() {
 
 // ================= QUẢN LÝ THIẾT LẬP GIAO DIỆN & LOANG MÀU =================
 class AppSettings extends ChangeNotifier {
-  Color _themeColor = const Color(0xFFEF4444); // Ruby Red mặc định
+  Color _themeColor = const Color(0xFFEF4444); // Ruby Red
   bool _isGridMode = true;
   int _dailyGoal = 500;
-  bool _isSerifFont = false;
 
   Color get themeColor => _themeColor;
   bool get isGridMode => _isGridMode;
   int get dailyGoal => _dailyGoal;
-  bool get isSerifFont => _isSerifFont;
 
   void setThemeColor(Color color) {
     _themeColor = color;
@@ -36,11 +32,6 @@ class AppSettings extends ChangeNotifier {
 
   void setDailyGoal(int goal) {
     _dailyGoal = goal;
-    notifyListeners();
-  }
-
-  void toggleFont() {
-    _isSerifFont = !_isSerifFont;
     notifyListeners();
   }
 }
@@ -191,7 +182,6 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          // LOANG MÀU NỀN DYNAMIC (AMBIENT GLOW)
           Positioned(
             top: -100,
             left: -100,
@@ -204,17 +194,14 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ),
-          
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16.0),
               child: Column(
                 children: [
                   const SizedBox(height: 8),
-                  // HEADER BAR
                   Row(
                     children: [
-                      // LOGO & STAR
                       Container(
                         padding: const EdgeInsets.all(4),
                         decoration: BoxDecoration(
@@ -232,16 +219,12 @@ class _HomeScreenState extends State<HomeScreen> {
                             IconButton(
                               constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
                               icon: const Icon(Icons.star_outline, color: Colors.amber, size: 20),
-                              onPressed: () {
-                                // Mở menu đổi màu
-                              },
+                              onPressed: () {},
                             ),
                           ],
                         ),
                       ),
                       const SizedBox(width: 8),
-
-                      // THẺ MỤC TIÊU VIẾT
                       Expanded(
                         child: GestureDetector(
                           onTap: _showGoalDialog,
@@ -271,8 +254,6 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                       const SizedBox(width: 8),
-
-                      // DỌC / NGANG LAYOUT TOGGLE
                       Container(
                         decoration: BoxDecoration(
                           color: Colors.white.withOpacity(0.08),
@@ -286,9 +267,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ],
                   ),
-
                   const SizedBox(height: 16),
-                  // SEARCH BAR
                   TextField(
                     decoration: InputDecoration(
                       hintText: 'Tìm kiếm bài viết...',
@@ -299,9 +278,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none),
                     ),
                   ),
-
                   const SizedBox(height: 16),
-                  // DANH SÁCH BÀI VIẾT
                   Expanded(
                     child: ListView.builder(
                       itemCount: _notes.length,
