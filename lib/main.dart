@@ -128,7 +128,6 @@ class NovelApp extends StatelessWidget {
     );
   }
 }
-
 // ================= MÀN HÌNH CHÍNH =================
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
