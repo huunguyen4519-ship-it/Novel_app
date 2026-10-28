@@ -236,7 +236,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          // QUẦNG SÁNG RADIAL GRADIENT MỜ MỊN LAN TỎA
+          // QUẦNG SÁNG RADIAL GRADIENT MỜ MỊN
           Positioned(
             top: -100,
             left: -100,
