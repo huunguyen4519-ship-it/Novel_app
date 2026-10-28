@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build Release APK
@@ -30,15 +33,22 @@ jobs:
       - name: Recreate Android project files
         run: flutter create . --project-name=novel_app --platforms=android --org=com.azrael.novelapp
 
+      - name: Set app display name
+        run: sed -i 's/android:label="novel_app"/android:label="Novel App"/' android/app/src/main/AndroidManifest.xml
+
       - name: Get dependencies
         run: flutter pub get
 
+      - name: Run tests
+        run: flutter test
+        continue-on-error: true
+
       - name: Build Android APK
-        run: flutter build apk --debug
+        run: flutter build apk --release
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: novel-app-debug-apk
-          path: build/app/outputs/flutter-apk/app-debug.apk
-          
+          name: novel-app-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
