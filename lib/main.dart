@@ -1,13 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 
 void main() {
-  runApp(
-    ChangeNotifierProvider(
-      create: (context) => AppSettings(),
-      child: const NovelApp(),
-    ),
-  );
+  runApp(const NovelApp());
 }
 
 // ================= MODEL BÀI VIẾT =================
@@ -29,12 +23,62 @@ class Note {
   });
 }
 
-// ================= QUẢN LÝ TRẠNG THÁI =================
-class AppSettings extends ChangeNotifier {
+// ================= GỐC ỨNG DỤNG =================
+class NovelApp extends StatefulWidget {
+  const NovelApp({super.key});
+
+  @override
+  State<NovelApp> createState() => _NovelAppState();
+}
+
+class _NovelAppState extends State<NovelApp> {
   Color _themeColor = const Color(0xFFEF4444);
+
+  void _changeThemeColor(Color color) {
+    setState(() {
+      _themeColor = color;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Novel App',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF08080A),
+        primaryColor: _themeColor,
+        colorScheme: ColorScheme.dark(primary: _themeColor),
+      ),
+      home: HomeScreen(
+        themeColor: _themeColor,
+        onThemeChanged: _changeThemeColor,
+      ),
+    );
+  }
+}
+
+// ================= MÀN HÌNH CHÍNH =================
+class HomeScreen extends StatefulWidget {
+  final Color themeColor;
+  final ValueChanged<Color> onThemeChanged;
+
+  const HomeScreen({
+    super.key,
+    required this.themeColor,
+    required this.onThemeChanged,
+  });
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
   bool _isGridMode = true;
   int _dailyGoal = 500;
-  List<Note> _notes = [
+  String _searchQuery = '';
+
+  final List<Note> _notes = [
     Note(
       id: '1',
       title: 'Ý tưởng tiểu thuyết mới',
@@ -55,101 +99,17 @@ class AppSettings extends ChangeNotifier {
     ),
   ];
 
-  Color get themeColor => _themeColor;
-  bool get isGridMode => _isGridMode;
-  int get dailyGoal => _dailyGoal;
-  List<Note> get notes => _notes;
-
-  void setThemeColor(Color color) {
-    _themeColor = color;
-    notifyListeners();
-  }
-
-  void toggleGridMode() {
-    _isGridMode = !_isGridMode;
-    notifyListeners();
-  }
-
-  void setDailyGoal(int goal) {
-    _dailyGoal = goal;
-    notifyListeners();
-  }
-
-  void addOrUpdateNote(Note note) {
-    final index = _notes.indexWhere((n) => n.id == note.id);
-    if (index >= 0) {
-      _notes[index] = note;
-    } else {
-      _notes.insert(0, note);
-    }
-    _sortNotes();
-    notifyListeners();
-  }
-
-  void deleteNote(String id) {
-    _notes.removeWhere((n) => n.id == id);
-    notifyListeners();
-  }
-
-  void togglePin(String id) {
-    final index = _notes.indexWhere((n) => n.id == id);
-    if (index >= 0) {
-      _notes[index].isPinned = !_notes[index].isPinned;
-      _sortNotes();
-      notifyListeners();
-    }
-  }
-
-  void _sortNotes() {
-    _notes.sort((a, b) {
-      if (a.isPinned && !b.isPinned) return -1;
-      if (!a.isPinned && b.isPinned) return 1;
-      return 0;
-    });
-  }
-}
-
-// ================= GỐC ỨNG DỤNG =================
-class NovelApp extends StatelessWidget {
-  const NovelApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final settings = Provider.of<AppSettings>(context);
-    return MaterialApp(
-      title: 'Novel App',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF08080A),
-        primaryColor: settings.themeColor,
-        colorScheme: ColorScheme.dark(primary: settings.themeColor),
-      ),
-      home: const HomeScreen(),
-    );
-  }
-}
-// ================= MÀN HÌNH CHÍNH =================
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
-
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
-}
-
-class _HomeScreenState extends State<HomeScreen> {
-  String _searchQuery = '';
-
   void _showAboutDialog() {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF16161C),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        title: const Row(
+        title: Row(
           children: [
-            Icon(Icons.bolt, color: Colors.redAccent),
-            SizedBox(width: 8),
-            Text('Azrael Novel App',
+            Icon(Icons.bolt, color: widget.themeColor),
+            const SizedBox(width: 8),
+            const Text('Azrael Novel App',
                 style: TextStyle(fontSize: 18, color: Colors.white)),
           ],
         ),
@@ -170,8 +130,8 @@ class _HomeScreenState extends State<HomeScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Trải nghiệm ngay',
-                style: TextStyle(color: Colors.redAccent)),
+            child: Text('Trải nghiệm ngay',
+                style: TextStyle(color: widget.themeColor)),
           ),
         ],
       ),
@@ -179,9 +139,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _showGoalDialog() {
-    final settings = Provider.of<AppSettings>(context, listen: false);
-    final controller =
-        TextEditingController(text: settings.dailyGoal.toString());
+    final controller = TextEditingController(text: _dailyGoal.toString());
 
     showDialog(
       context: context,
@@ -210,43 +168,75 @@ class _HomeScreenState extends State<HomeScreen> {
               child: const Text('Hủy', style: TextStyle(color: Colors.white54))),
           TextButton(
             onPressed: () {
-              final newGoal = int.tryParse(controller.text) ?? 500;
-              settings.setDailyGoal(newGoal);
+              setState(() {
+                _dailyGoal = int.tryParse(controller.text) ?? 500;
+              });
               Navigator.pop(context);
             },
-            child: const Text('Lưu', style: TextStyle(color: Colors.redAccent)),
+            child: Text('Lưu', style: TextStyle(color: widget.themeColor)),
           ),
         ],
       ),
     );
   }
 
-  void _openEditor([Note? note]) {
-    Navigator.push(
+  void _openEditor([Note? note]) async {
+    final result = await Navigator.push<Note>(
       context,
       MaterialPageRoute(
-        builder: (context) => EditorScreen(note: note),
+        builder: (context) => EditorScreen(
+          note: note,
+          themeColor: widget.themeColor,
+        ),
       ),
     );
+
+    if (result != null) {
+      setState(() {
+        final index = _notes.indexWhere((n) => n.id == result.id);
+        if (index >= 0) {
+          _notes[index] = result;
+        } else {
+          _notes.insert(0, result);
+        }
+        _sortNotes();
+      });
+    }
+  }
+
+  void _togglePin(String id) {
+    setState(() {
+      final index = _notes.indexWhere((n) => n.id == id);
+      if (index >= 0) {
+        _notes[index].isPinned = !_notes[index].isPinned;
+        _sortNotes();
+      }
+    });
+  }
+
+  void _sortNotes() {
+    _notes.sort((a, b) {
+      if (a.isPinned && !b.isPinned) return -1;
+      if (!a.isPinned && b.isPinned) return 1;
+      return 0;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final settings = Provider.of<AppSettings>(context);
-    final filteredNotes = settings.notes.where((n) {
+    final filteredNotes = _notes.where((n) {
       final q = _searchQuery.toLowerCase();
       return n.title.toLowerCase().contains(q) ||
           n.content.toLowerCase().contains(q);
     }).toList();
 
-    final totalWords =
-        settings.notes.fold<int>(0, (sum, n) => sum + n.words);
-    final progress = (totalWords / settings.dailyGoal).clamp(0.0, 1.0);
+    final totalWords = _notes.fold<int>(0, (sum, n) => sum + n.words);
+    final progress = (totalWords / _dailyGoal).clamp(0.0, 1.0);
 
     return Scaffold(
       body: Stack(
         children: [
-          // QUẦNG SÁNG RADIAL GRADIENT MỜ MỊN Lan Tỏa
+          // QUẦNG SÁNG RADIAL GRADIENT MỜ MỊN LAN TỎA
           Positioned(
             top: -100,
             left: -100,
@@ -257,8 +247,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 shape: BoxShape.circle,
                 gradient: RadialGradient(
                   colors: [
-                    settings.themeColor.withOpacity(0.45),
-                    settings.themeColor.withOpacity(0.15),
+                    widget.themeColor.withOpacity(0.45),
+                    widget.themeColor.withOpacity(0.15),
                     Colors.transparent,
                   ],
                   stops: const [0.0, 0.5, 1.0],
@@ -286,8 +276,8 @@ class _HomeScreenState extends State<HomeScreen> {
                             IconButton(
                               constraints: const BoxConstraints(
                                   minWidth: 36, minHeight: 36),
-                              icon: const Icon(Icons.bolt,
-                                  color: Colors.redAccent, size: 20),
+                              icon: Icon(Icons.bolt,
+                                  color: widget.themeColor, size: 20),
                               onPressed: _showAboutDialog,
                             ),
                             IconButton(
@@ -303,10 +293,10 @@ class _HomeScreenState extends State<HomeScreen> {
                                   const Color(0xFFA855F7),
                                 ];
                                 final nextIndex = (colors.indexOf(
-                                            settings.themeColor) +
+                                            widget.themeColor) +
                                         1) %
                                     colors.length;
-                                settings.setThemeColor(colors[nextIndex]);
+                                widget.onThemeChanged(colors[nextIndex]);
                               },
                             ),
                           ],
@@ -334,7 +324,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                         color: Colors.white)),
                                 const SizedBox(height: 2),
                                 Text(
-                                    'Mục tiêu: $totalWords / ${settings.dailyGoal} từ',
+                                    'Mục tiêu: $totalWords / $_dailyGoal từ',
                                     style: const TextStyle(
                                         fontSize: 10, color: Colors.white70)),
                                 const SizedBox(height: 4),
@@ -342,7 +332,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   value: progress,
                                   backgroundColor: Colors.white10,
                                   valueColor: AlwaysStoppedAnimation<Color>(
-                                      settings.themeColor),
+                                      widget.themeColor),
                                   minHeight: 3,
                                 ),
                               ],
@@ -359,11 +349,15 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         child: IconButton(
                           icon: Icon(
-                              settings.isGridMode
+                              _isGridMode
                                   ? Icons.grid_view
                                   : Icons.view_agenda,
                               size: 18),
-                          onPressed: settings.toggleGridMode,
+                          onPressed: () {
+                            setState(() {
+                              _isGridMode = !_isGridMode;
+                            });
+                          },
                         ),
                       ),
                     ],
@@ -390,7 +384,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             child: Text('Chưa có bài viết nào',
                                 style: TextStyle(color: Colors.white38)),
                           )
-                        : settings.isGridMode
+                        : _isGridMode
                             ? GridView.builder(
                                 gridDelegate:
                                     const SliverGridDelegateWithFixedCrossAxisCount(
@@ -402,14 +396,14 @@ class _HomeScreenState extends State<HomeScreen> {
                                 itemCount: filteredNotes.length,
                                 itemBuilder: (context, index) {
                                   return _buildNoteCard(
-                                      filteredNotes[index], settings);
+                                      filteredNotes[index]);
                                 },
                               )
                             : ListView.builder(
                                 itemCount: filteredNotes.length,
                                 itemBuilder: (context, index) {
                                   return _buildNoteCard(
-                                      filteredNotes[index], settings);
+                                      filteredNotes[index]);
                                 },
                               ),
                   ),
@@ -420,25 +414,25 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton(
-        backgroundColor: settings.themeColor,
+        backgroundColor: widget.themeColor,
         child: const Icon(Icons.add, color: Colors.white, size: 28),
         onPressed: () => _openEditor(),
       ),
     );
   }
 
-  Widget _buildNoteCard(Note note, AppSettings settings) {
+  Widget _buildNoteCard(Note note) {
     return GestureDetector(
       onTap: () => _openEditor(note),
       child: Container(
-        margin: EdgeInsets.only(bottom: settings.isGridMode ? 0 : 12),
+        margin: EdgeInsets.only(bottom: _isGridMode ? 0 : 12),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: Colors.white.withOpacity(0.05),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
               color: note.isPinned
-                  ? settings.themeColor.withOpacity(0.5)
+                  ? widget.themeColor.withOpacity(0.5)
                   : Colors.white10),
         ),
         child: Column(
@@ -464,7 +458,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     size: 16,
                     color: note.isPinned ? Colors.amber : Colors.white24,
                   ),
-                  onPressed: () => settings.togglePin(note.id),
+                  onPressed: () => _togglePin(note.id),
                 ),
               ],
             ),
@@ -472,7 +466,7 @@ class _HomeScreenState extends State<HomeScreen> {
             Expanded(
               child: Text(
                 note.content,
-                maxLines: settings.isGridMode ? 3 : 4,
+                maxLines: _isGridMode ? 3 : 4,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: Colors.white60, fontSize: 13),
               ),
@@ -499,7 +493,13 @@ class _HomeScreenState extends State<HomeScreen> {
 // ================= MÀN HÌNH SOẠN THẢO VĂN BẢN (EDITOR) =================
 class EditorScreen extends StatefulWidget {
   final Note? note;
-  const EditorScreen({super.key, this.note});
+  final Color themeColor;
+
+  const EditorScreen({
+    super.key,
+    this.note,
+    required this.themeColor,
+  });
 
   @override
   State<EditorScreen> createState() => _EditorScreenState();
@@ -529,7 +529,7 @@ class _EditorScreenState extends State<EditorScreen> {
     });
   }
 
-  void _saveNote() {
+  void _saveAndExit() {
     final title = _titleController.text.trim();
     final content = _contentController.text.trim();
 
@@ -550,16 +550,7 @@ class _EditorScreenState extends State<EditorScreen> {
       date: dateStr,
     );
 
-    Provider.of<AppSettings>(context, listen: false).addOrUpdateNote(noteToSave);
-    Navigator.pop(context);
-  }
-
-  void _deleteNote() {
-    if (widget.note != null) {
-      Provider.of<AppSettings>(context, listen: false)
-          .deleteNote(widget.note!.id);
-    }
-    Navigator.pop(context);
+    Navigator.pop(context, noteToSave);
   }
 
   @override
@@ -571,8 +562,6 @@ class _EditorScreenState extends State<EditorScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final settings = Provider.of<AppSettings>(context);
-
     return Scaffold(
       backgroundColor: const Color(0xFF08080A),
       appBar: AppBar(
@@ -580,17 +569,12 @@ class _EditorScreenState extends State<EditorScreen> {
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white),
-          onPressed: _saveNote,
+          onPressed: _saveAndExit,
         ),
         actions: [
-          if (widget.note != null)
-            IconButton(
-              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-              onPressed: _deleteNote,
-            ),
           IconButton(
-            icon: Icon(Icons.check, color: settings.themeColor, size: 28),
-            onPressed: _saveNote,
+            icon: Icon(Icons.check, color: widget.themeColor, size: 28),
+            onPressed: _saveAndExit,
           ),
           const SizedBox(width: 8),
         ],
@@ -618,13 +602,13 @@ class _EditorScreenState extends State<EditorScreen> {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
-                      color: settings.themeColor.withOpacity(0.2),
+                      color: widget.themeColor.withOpacity(0.2),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Text(
                       '$_wordCount từ',
                       style: TextStyle(
-                          color: settings.themeColor,
+                          color: widget.themeColor,
                           fontSize: 12,
                           fontWeight: FontWeight.bold),
                     ),
