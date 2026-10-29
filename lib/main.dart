@@ -1,22 +1,22 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-Future<void> main() async {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final state = await AppState.load();
-  runApp(NovelApp(state: state));
+  runApp(const NovelApp());
 }
 
-// ================= HẰNG SỐ GIAO DIỆN =================
+// ================= HẰNG SỐ =================
 
-/// Các màu chủ đề (chọn trong menu ngôi sao).
 const List<Color> kThemeColors = [
   Color(0xFFEF4444),
   Color(0xFF3B82F6),
@@ -26,24 +26,8 @@ const List<Color> kThemeColors = [
   Color(0xFFEC4899),
 ];
 
-class BgOption {
-  const BgOption(this.name, this.color);
-  final String name;
-  final Color color;
-}
-
-/// Các màu nền tối (chọn trong menu ngôi sao).
-const List<BgOption> kBackgrounds = [
-  BgOption('Đen thuần', Color(0xFF08080A)),
-  BgOption('Than chì', Color(0xFF121217)),
-  BgOption('Xanh đêm', Color(0xFF0A1020)),
-  BgOption('Nâu cà phê', Color(0xFF15100D)),
-];
-
-const List<String> kFontNames = ['Mặc định', 'Có chân', 'Đơn cách'];
-const List<String?> kFontFamilies = [null, 'serif', 'monospace'];
-
 const Color kWhite90 = Color(0xE6FFFFFF);
+const Color kBg = Color(0xFF08080A);
 
 extension ColorFade on Color {
   Color fade(double opacity) => withAlpha((opacity * 255).round());
@@ -57,17 +41,16 @@ bool _isWhitespace(int unit) {
       unit == 0x85 ||
       unit == 0xA0 ||
       unit == 0x1680 ||
-      (unit >= 0x2000 && unit <= 0x200B) ||
+      (unit >= 0x2000 && unit <= 0x200A) ||
       unit == 0x2028 ||
       unit == 0x2029 ||
       unit == 0x202F ||
       unit == 0x205F ||
-      unit == 0x3000 ||
-      unit == 0xFEFF;
+      unit == 0x3000;
 }
 
-/// Đếm số từ: mỗi cụm ký tự liền nhau (ngăn cách bởi khoảng trắng/xuống dòng)
-/// là một từ. Duyệt một lượt, không tạo danh sách trung gian.
+/// Đếm từ Unicode-safe: bỏ qua dấu thanh tiếng Việt khi đếm bằng cách
+/// duyệt code unit. Không tạo list trung gian nên rất nhanh.
 int countWords(String text) {
   var count = 0;
   var inWord = false;
@@ -90,82 +73,305 @@ String previewText(String text, {int maxChars = 240}) {
   return text.substring(0, end);
 }
 
-String _two(int v) => v.toString().padLeft(2, '0');
-
-String formatDate(DateTime date) => '${_two(date.day)}/${_two(date.month)}';
-
-String formatDateLong(DateTime d) =>
-    '${_two(d.day)}/${_two(d.month)}/${d.year} ${_two(d.hour)}:${_two(d.minute)}';
+String formatDate(DateTime date) {
+  final day = date.day.toString().padLeft(2, '0');
+  final month = date.month.toString().padLeft(2, '0');
+  return '$day/$month';
+}
 
 DateTime dateOnly(DateTime date) => DateTime(date.year, date.month, date.day);
 
-String dateKey(DateTime d) => '${d.year.toString().padLeft(4, '0')}-${_two(d.month)}-${_two(d.day)}';
-
-int _asInt(Object? v, int def) => v is num ? v.toInt() : def;
-double _asDouble(Object? v, double def) => v is num ? v.toDouble() : def;
-bool _asBool(Object? v, bool def) => v is bool ? v : def;
-String _asString(Object? v, String def) => v is String ? v : def;
-int _clampIndex(int v, int length) => v < 0 || v >= length ? 0 : v;
-
-// ================= ĐỊNH DẠNG CHỮ (LƯU THEO TỪNG KÝ TỰ) =================
-// Mỗi ký tự có 1 số nguyên kiểu bit:
-//   bit 0 = đậm, bit 1 = nghiêng, bit 2 = gạch chân, bit 3 = gạch ngang
-//   bit 4-5 = kiểu dòng: 0 thường, 1 = H1, 2 = H2, 3 = H3
-const int kBold = 1;
-const int kItalic = 2;
-const int kUnderline = 4;
-const int kStrike = 8;
-
-List<int> fitStyles(List<int>? source, int length) {
-  final out = List<int>.from(source ?? const <int>[]);
-  if (out.length > length) {
-    out.removeRange(length, out.length);
-  } else if (out.length < length) {
-    out.addAll(List<int>.filled(length - out.length, 0));
-  }
-  return out;
+String stripMarkdown(String text) {
+  return text
+      .replaceAll(RegExp(r'\*\*(.+?)\*\*'), r'$1')
+      .replaceAll(RegExp(r'\*(.+?)\*'), r'$1')
+      .replaceAll(RegExp(r'__(.+?)__'), r'$1')
+      .replaceAll(RegExp(r'^#{1,6}\s+', multiLine: true), '')
+      .replaceAll(RegExp(r'\n+'), ' ')
+      .trim();
 }
 
-String encodeStyles(List<int> s) {
-  if (s.isEmpty) return '';
-  final parts = <String>[];
-  var run = s[0];
-  var n = 0;
-  for (final v in s) {
-    if (v == run) {
-      n++;
+// ================= MARKDOWN =================
+
+/// Parse markdown inline thành TextSpan để hiển thị.
+TextSpan parseInlineMarkdown(String text, TextStyle baseStyle) {
+  final spans = <TextSpan>[];
+  final regex = RegExp(r'(\*\*(.+?)\*\*)|(\*(.+?)\*)|(__(.+?)__)');
+  var lastEnd = 0;
+  for (final match in regex.allMatches(text)) {
+    if (match.start > lastEnd) {
+      spans.add(TextSpan(text: text.substring(lastEnd, match.start)));
+    }
+    if (match.group(2) != null) {
+      spans.add(TextSpan(
+        text: match.group(2),
+        style: const TextStyle(fontWeight: FontWeight.bold),
+      ));
+    } else if (match.group(4) != null) {
+      spans.add(TextSpan(
+        text: match.group(4),
+        style: const TextStyle(fontStyle: FontStyle.italic),
+      ));
+    } else if (match.group(6) != null) {
+      spans.add(TextSpan(
+        text: match.group(6),
+        style: const TextStyle(decoration: TextDecoration.underline),
+      ));
+    }
+    lastEnd = match.end;
+  }
+  if (lastEnd < text.length) {
+    spans.add(TextSpan(text: text.substring(lastEnd)));
+  }
+  return TextSpan(style: baseStyle, children: spans);
+}
+
+/// Render toàn bộ markdown thành widget (dùng cho preview).
+Widget renderMarkdown(String markdown, Color themeColor) {
+  final lines = markdown.split('\n');
+  final children = <Widget>[];
+  const base = TextStyle(color: kWhite90, fontSize: 16, height: 1.6);
+
+  for (final line in lines) {
+    final trimmed = line.trimLeft();
+    if (trimmed.isEmpty) {
+      children.add(const SizedBox(height: 12));
+      continue;
+    }
+    if (trimmed.startsWith('# ')) {
+      children.add(Padding(
+        padding: const EdgeInsets.only(top: 16, bottom: 8),
+        child: RichText(
+          text: parseInlineMarkdown(
+            trimmed.substring(2),
+            base.copyWith(
+              fontSize: 26,
+              fontWeight: FontWeight.w800,
+              color: Colors.white,
+              height: 1.3,
+            ),
+          ),
+        ),
+      ));
+    } else if (trimmed.startsWith('## ')) {
+      children.add(Padding(
+        padding: const EdgeInsets.only(top: 12, bottom: 6),
+        child: RichText(
+          text: parseInlineMarkdown(
+            trimmed.substring(3),
+            base.copyWith(
+              fontSize: 20,
+              fontWeight: FontWeight.w700,
+              color: Colors.white,
+              height: 1.3,
+            ),
+          ),
+        ),
+      ));
     } else {
-      parts.add('$n:$run');
-      run = v;
-      n = 1;
+      children.add(RichText(text: parseInlineMarkdown(line, base)));
     }
   }
-  parts.add('$n:$run');
-  return parts.join(',');
+  return Column(crossAxisAlignment: CrossAxisAlignment.start, children: children);
 }
 
-List<int> decodeStyles(String encoded, int length) {
-  final out = <int>[];
-  if (encoded.isNotEmpty) {
-    for (final part in encoded.split(',')) {
-      final kv = part.split(':');
-      if (kv.length != 2) continue;
-      final n = int.tryParse(kv[0]);
-      final v = int.tryParse(kv[1]);
-      if (n == null || v == null || n < 0 || n > 5000000) continue;
-      out.addAll(List<int>.filled(n, v));
+// ================= XUẤT FILE =================
+
+String _escapeXml(String text) => text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+
+String _runXml(String text, {bool bold = false, bool italic = false, bool underline = false, int? size}) {
+  if (text.isEmpty) return '';
+  final buf = StringBuffer('<w:r>');
+  if (bold || italic || underline || size != null) {
+    buf.write('<w:rPr>');
+    if (bold) buf.write('<w:b/>');
+    if (italic) buf.write('<w:i/>');
+    if (underline) buf.write('<w:u w:val="single"/>');
+    if (size != null) buf.write('<w:sz w:val="$size"/>');
+    buf.write('</w:rPr>');
+  }
+  buf.write('<w:t xml:space="preserve">${_escapeXml(text)}</w:t></w:r>');
+  return buf.toString();
+}
+
+String _inlineRuns(String text, {bool forceBold = false, int? size}) {
+  final buf = StringBuffer();
+  final regex = RegExp(r'(\*\*(.+?)\*\*)|(\*(.+?)\*)|(__(.+?)__)');
+  var lastEnd = 0;
+  for (final m in regex.allMatches(text)) {
+    if (m.start > lastEnd) {
+      buf.write(_runXml(text.substring(lastEnd, m.start), bold: forceBold, size: size));
+    }
+    if (m.group(2) != null) {
+      buf.write(_runXml(m.group(2)!, bold: true, size: size));
+    } else if (m.group(4) != null) {
+      buf.write(_runXml(m.group(4)!, italic: true, bold: forceBold, size: size));
+    } else if (m.group(6) != null) {
+      buf.write(_runXml(m.group(6)!, underline: true, bold: forceBold, size: size));
+    }
+    lastEnd = m.end;
+  }
+  if (lastEnd < text.length) {
+    buf.write(_runXml(text.substring(lastEnd), bold: forceBold, size: size));
+  }
+  return buf.toString();
+}
+
+String _markdownToWordXml(String markdown) {
+  final buf = StringBuffer();
+  for (final line in markdown.split('\n')) {
+    final trimmed = line.trimLeft();
+    if (trimmed.isEmpty) {
+      buf.write('<w:p/>');
+      continue;
+    }
+    if (trimmed.startsWith('# ')) {
+      buf.write('<w:p>${_inlineRuns(trimmed.substring(2), forceBold: true, size: 48)}</w:p>');
+    } else if (trimmed.startsWith('## ')) {
+      buf.write('<w:p>${_inlineRuns(trimmed.substring(3), forceBold: true, size: 36)}</w:p>');
+    } else if (trimmed.startsWith('### ')) {
+      buf.write('<w:p>${_inlineRuns(trimmed.substring(4), forceBold: true, size: 30)}</w:p>');
+    } else {
+      buf.write('<w:p>${_inlineRuns(line)}</w:p>');
     }
   }
-  return fitStyles(out, length);
+  return buf.toString();
 }
 
-// ================= MODEL BÀI VIẾT =================
+/// Sinh file DOCX hoàn chỉnh trong bộ nhớ (ZIP + OOXML).
+Uint8List generateDocx(String title, String markdownContent) {
+  final documentXml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+${_markdownToWordXml(markdownContent)}
+<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+</w:body>
+</w:document>''';
+
+  final contentTypes = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>''';
+
+  final rels = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>''';
+
+  final archive = Archive();
+  void add(String name, String content) {
+    final bytes = utf8.encode(content);
+    archive.addFile(ArchiveFile(name, bytes.length, bytes));
+  }
+  add('[Content_Types].xml', contentTypes);
+  add('_rels/.rels', rels);
+  add('word/document.xml', documentXml);
+
+  final zipped = ZipEncoder().encode(archive);
+  return Uint8List.fromList(zipped);
+}
+
+String generateTxt(String title, String content) {
+  return '$title\n\n${stripMarkdown(content)}';
+}
+
+String generateMarkdown(String title, String content) {
+  return '# $title\n\n$content';
+}
+
+String generateHtml(String title, String markdownContent) {
+  final html = StringBuffer();
+  for (final line in markdownContent.split('\n')) {
+    final t = line.trimLeft();
+    if (t.isEmpty) { html.write('<p></p>\n'); continue; }
+    if (t.startsWith('# ')) {
+      html.write('<h1>${_escapeXml(t.substring(2))}</h1>\n');
+    } else if (t.startsWith('## ')) {
+      html.write('<h2>${_escapeXml(t.substring(3))}</h2>\n');
+    } else if (t.startsWith('### ')) {
+      html.write('<h3>${_escapeXml(t.substring(4))}</h3>\n');
+    } else {
+      var s = _escapeXml(line);
+      s = s.replaceAllMapped(RegExp(r'\*\*(.+?)\*\*'), (m) => '<strong>${m.group(1)}</strong>');
+      s = s.replaceAllMapped(RegExp(r'\*(.+?)\*'), (m) => '<em>${m.group(1)}</em>');
+      s = s.replaceAllMapped(RegExp(r'__(.+?)__'), (m) => '<u>${m.group(1)}</u>');
+      html.write('<p>$s</p>\n');
+    }
+  }
+  return '''<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>${_escapeXml(title)}</title>
+<style>body{font-family:Georgia,serif;max-width:800px;margin:40px auto;padding:20px;line-height:1.7;color:#222}h1{border-bottom:2px solid #333;padding-bottom:8px}</style>
+</head><body><h1>${_escapeXml(title)}</h1>$html</body></html>''';
+}
+
+enum ExportFormat { docx, txt, markdown, html }
+
+extension ExportFormatExt on ExportFormat {
+  String get label => switch (this) {
+        ExportFormat.docx => 'Word (.docx)',
+        ExportFormat.txt => 'Văn bản (.txt)',
+        ExportFormat.markdown => 'Markdown (.md)',
+        ExportFormat.html => 'HTML (.html)',
+      };
+  String get extension => switch (this) {
+        ExportFormat.docx => 'docx',
+        ExportFormat.txt => 'txt',
+        ExportFormat.markdown => 'md',
+        ExportFormat.html => 'html',
+      };
+  String get mimeType => switch (this) {
+        ExportFormat.docx => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ExportFormat.txt => 'text/plain',
+        ExportFormat.markdown => 'text/markdown',
+        ExportFormat.html => 'text/html',
+      };
+}
+
+/// Sinh nội dung file theo định dạng.
+Uint8List buildExportBytes(ExportFormat format, String title, String content) {
+  switch (format) {
+    case ExportFormat.docx:
+      return generateDocx(title, content);
+    case ExportFormat.txt:
+      return Uint8List.fromList(utf8.encode(generateTxt(title, content)));
+    case ExportFormat.markdown:
+      return Uint8List.fromList(utf8.encode(generateMarkdown(title, content)));
+    case ExportFormat.html:
+      return Uint8List.fromList(utf8.encode(generateHtml(title, content)));
+  }
+}
+
+/// Lưu file tạm và mở hệ thống chia sẻ — đây chính là cách "xuất file".
+Future<void> exportAndShare(BuildContext context, ExportFormat format, String title, String content) async {
+  try {
+    final bytes = buildExportBytes(format, title, content);
+    final dir = await getTemporaryDirectory();
+    final safeTitle = title.replaceAll(RegExp(r'[^\w\s\-À-ỹ]'), '').trim().replaceAll(' ', '_');
+    final fileName = '${safeTitle.isEmpty ? 'novel' : safeTitle}_${DateTime.now().millisecondsSinceEpoch}.${format.extension}';
+    final file = File('${dir.path}/$fileName');
+    await file.writeAsBytes(bytes);
+    if (!context.mounted) return;
+    await Share.shareXFiles([XFile(file.path, mimeType: format.mimeType)], subject: title);
+  } catch (e) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Lỗi xuất file: $e'), backgroundColor: Colors.redAccent),
+    );
+  }
+}
+
+// ================= MODEL =================
+
 class Note {
   const Note({
     required this.id,
     required this.title,
     required this.content,
-    this.styles = '',
     this.isPinned = false,
     required this.words,
     required this.updatedAt,
@@ -174,44 +380,20 @@ class Note {
   final String id;
   final String title;
   final String content;
-  final String styles; // định dạng chữ đã mã hóa
   final bool isPinned;
   final int words;
   final DateTime updatedAt;
 
-  Note copyWith({bool? isPinned}) {
+  Note copyWith({
+    String? title, String? content, bool? isPinned, int? words, DateTime? updatedAt,
+  }) {
     return Note(
       id: id,
-      title: title,
-      content: content,
-      styles: styles,
+      title: title ?? this.title,
+      content: content ?? this.content,
       isPinned: isPinned ?? this.isPinned,
-      words: words,
-      updatedAt: updatedAt,
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'content': content,
-        'styles': styles,
-        'pinned': isPinned,
-        'words': words,
-        'updatedAt': updatedAt.toIso8601String(),
-      };
-
-  static Note fromJson(Map<String, dynamic> m) {
-    final content = _asString(m['content'], '');
-    return Note(
-      id: _asString(m['id'], DateTime.now().microsecondsSinceEpoch.toString()),
-      title: _asString(m['title'], ''),
-      content: content,
-      styles: _asString(m['styles'], ''),
-      isPinned: _asBool(m['pinned'], false),
-      words: countWords(content),
-      updatedAt: DateTime.tryParse(_asString(m['updatedAt'], '')) ??
-          DateTime.now(),
+      words: words ?? this.words,
+      updatedAt: updatedAt ?? this.updatedAt,
     );
   }
 }
@@ -219,204 +401,196 @@ class Note {
 List<Note> _sampleNotes() {
   final now = DateTime.now();
   const welcome =
-      'Chào mừng bạn đến với ứng dụng Novel App! Nhấn nút cộng ở góc dưới để '
-      'tạo bài viết mới hoặc nhấn vào bài này để chỉnh sửa. Nhấn giữ một bài '
-      'viết để xóa. Nhấn ngôi sao ở góc trên để mở menu: giao diện, xuất file '
-      'và điểm danh chuỗi.';
+      'Chào mừng bạn đến với **Novel App**!\n\nNhấn nút cộng ở góc dưới để tạo bài viết mới, hoặc nhấn vào bài này để chỉnh sửa. Nhấn giữ một bài viết để xóa.\n\n## Mẹo dùng nhanh\n- Dùng thanh công cụ để in đậm, in nghiêng, gạch chân, H1, H2.\n- Bấm ngôi sao để mở menu cài đặt và xuất file DOCX.';
   const chapter =
-      'Arista Valerius đứng trên đỉnh ngọn đồi nhìn xuống thung lũng sương mù...';
+      '# Chương 1: Khởi hành\n\nArista Valerius đứng trên đỉnh ngọn đồi nhìn xuống thung lũng sương mù. Gió lạnh mang theo hương thông, thổi tung mái tóc bạc của cô. Phía chân trời, ánh bình minh đầu tiên đang nhuộm hồng những đỉnh núi xa.';
   return [
     Note(
-      id: '1',
-      title: 'Ý tưởng tiểu thuyết mới',
-      content: welcome,
-      isPinned: true,
-      words: countWords(welcome),
+      id: '1', title: 'Ý tưởng tiểu thuyết mới', content: welcome,
+      isPinned: true, words: countWords(stripMarkdown(welcome)),
       updatedAt: now.subtract(const Duration(days: 1)),
     ),
     Note(
-      id: '2',
-      title: 'Con đường của ánh sáng - Chương 1',
-      content: chapter,
-      words: countWords(chapter),
+      id: '2', title: 'Con đường của ánh sáng - Chương 1', content: chapter,
+      words: countWords(stripMarkdown(chapter)),
       updatedAt: now.subtract(const Duration(days: 2)),
     ),
   ];
 }
 
-// ================= ĐỊNH DẠNG XUẤT FILE =================
-enum ExportFormat { txt, md, html, rtf, docx, json, csv }
+// ================= LƯU TRỮ (SharedPreferences) =================
 
-extension ExportFormatInfo on ExportFormat {
-  String get label => const {
-        ExportFormat.txt: 'TXT',
-        ExportFormat.md: 'Markdown',
-        ExportFormat.html: 'HTML',
-        ExportFormat.rtf: 'RTF',
-        ExportFormat.docx: 'DOCX',
-        ExportFormat.json: 'JSON',
-        ExportFormat.csv: 'CSV',
-      }[this]!;
+class Settings {
+  static const _kThemeIndex = 'themeIndex';
+  static const _kDailyGoal = 'dailyGoal';
 
-  String get ext => const {
-        ExportFormat.txt: 'txt',
-        ExportFormat.md: 'md',
-        ExportFormat.html: 'html',
-        ExportFormat.rtf: 'rtf',
-        ExportFormat.docx: 'docx',
-        ExportFormat.json: 'json',
-        ExportFormat.csv: 'csv',
-      }[this]!;
+  int themeIndex;
+  int dailyGoal;
 
-  String get mime => const {
-        ExportFormat.txt: 'text/plain',
-        ExportFormat.md: 'text/markdown',
-        ExportFormat.html: 'text/html',
-        ExportFormat.rtf: 'application/rtf',
-        ExportFormat.docx:
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        ExportFormat.json: 'application/json',
-        ExportFormat.csv: 'text/csv',
-      }[this]!;
+  Settings({this.themeIndex = 0, this.dailyGoal = 500});
 
-  bool get isText => this != ExportFormat.docx;
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    themeIndex = prefs.getInt(_kThemeIndex) ?? 0;
+    dailyGoal = prefs.getInt(_kDailyGoal) ?? 500;
+  }
+
+  Future<void> saveThemeIndex(int value) async {
+    themeIndex = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_kThemeIndex, value);
+  }
+
+  Future<void> saveDailyGoal(int value) async {
+    dailyGoal = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_kDailyGoal, value);
+  }
 }
 
-// ================= TRẠNG THÁI TOÀN APP (LƯU BỀN) =================
-class AppState extends ChangeNotifier {
-  AppState._(this._prefs);
+class StreakService {
+  static const _kLastDate = 'streak_last_date';
+  static const _kCount = 'streak_count';
 
-  final SharedPreferences _prefs;
+  int count = 0;
+  DateTime? lastDate;
 
-  static Future<AppState> load() async {
+  Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
-    final s = AppState._(prefs);
-    s._restore();
-    return s;
+    count = prefs.getInt(_kCount) ?? 0;
+    final iso = prefs.getString(_kLastDate);
+    lastDate = iso != null ? DateTime.tryParse(iso) : null;
+
+    // Nếu đã quá 1 ngày không viết → streak đứt
+    if (lastDate != null) {
+      final diff = dateOnly(DateTime.now()).difference(dateOnly(lastDate!)).inDays;
+      if (diff > 1) {
+        count = 0;
+        await prefs.setInt(_kCount, 0);
+      }
+    }
   }
 
-  // Giao diện
-  int themeIndex = 0;
-  int bgIndex = 0;
-  bool aurora = true;
-  double fontSize = 17;
-  double lineHeight = 1.6;
-  int fontIndex = 0;
-  bool isGridMode = true;
+  /// Trả về true nếu vừa check-in hôm nay (lần đầu).
+  Future<bool> checkInToday() async {
+    final today = dateOnly(DateTime.now());
+    final prefs = await SharedPreferences.getInstance();
+    if (lastDate != null && dateOnly(lastDate!) == today) return false;
 
-  // Mục tiêu viết
-  int dailyGoal = 500;
-  bool restReminder = true;
-  String restShownDay = '';
+    if (lastDate != null) {
+      final diff = today.difference(dateOnly(lastDate!)).inDays;
+      count = diff == 1 ? count + 1 : 1;
+    } else {
+      count = 1;
+    }
+    lastDate = DateTime.now();
+    await prefs.setInt(_kCount, count);
+    await prefs.setString(_kLastDate, lastDate!.toIso8601String());
+    return true;
+  }
+
+  bool get hasCheckedInToday {
+    if (lastDate == null) return false;
+    return dateOnly(lastDate!) == dateOnly(DateTime.now());
+  }
+}
+
+// ================= ROOT =================
+
+class NovelApp extends StatefulWidget {
+  const NovelApp({super.key});
+  @override
+  State<NovelApp> createState() => _NovelAppState();
+}
+
+class _NovelAppState extends State<NovelApp> {
+  final Settings _settings = Settings();
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _init();
+  }
+
+  Future<void> _init() async {
+    await _settings.load();
+    if (!mounted) return;
+    setState(() => _ready = true);
+  }
+
+  Color get _themeColor => kThemeColors[_settings.themeIndex % kThemeColors.length];
+
+  void _setThemeIndex(int i) {
+    setState(() => _settings.saveThemeIndex(i));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_ready) {
+      return const MaterialApp(
+        home: Scaffold(backgroundColor: kBg, body: Center(child: CircularProgressIndicator())),
+      );
+    }
+    return MaterialApp(
+      title: 'Novel App',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: kBg,
+        primaryColor: _themeColor,
+        colorScheme: ColorScheme.dark(primary: _themeColor),
+        snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+      ),
+      home: HomeScreen(
+        settings: _settings,
+        themeColor: _themeColor,
+        onThemeIndexChanged: _setThemeIndex,
+      ),
+    );
+  }
+}
+
+// ================= MÀN HÌNH CHÍNH =================
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({
+    super.key,
+    required this.settings,
+    required this.themeColor,
+    required this.onThemeIndexChanged,
+  });
+
+  final Settings settings;
+  final Color themeColor;
+  final ValueChanged<int> onThemeIndexChanged;
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  bool _isGridMode = true;
+  String _searchQuery = '';
   int _wordsToday = 0;
   DateTime _goalDay = dateOnly(DateTime.now());
+  final List<Note> _notes = _sampleNotes();
+  final StreakService _streak = StreakService();
+  bool _streakLoaded = false;
 
-  // Điểm danh
-  final Set<String> checkins = <String>{};
+  int get _dailyGoal => widget.settings.dailyGoal;
+  int get _todayWords => dateOnly(DateTime.now()) == _goalDay ? _wordsToday : 0;
 
-  // Xuất file
-  ExportFormat exportFormat = ExportFormat.docx;
-  bool exportTitle = true;
-  bool exportMeta = false;
-
-  List<Note> notes = [];
-
-  Color get themeColor => kThemeColors[themeIndex];
-  Color get bgColor => kBackgrounds[bgIndex].color;
-  String? get fontFamily => kFontFamilies[fontIndex];
-
-  // ---- đọc / ghi ----
-  void _restore() {
-    try {
-      final raw = _prefs.getString('settings');
-      if (raw != null) {
-        final m = jsonDecode(raw) as Map<String, dynamic>;
-        themeIndex = _clampIndex(_asInt(m['themeIndex'], 0), kThemeColors.length);
-        bgIndex = _clampIndex(_asInt(m['bgIndex'], 0), kBackgrounds.length);
-        aurora = _asBool(m['aurora'], true);
-        fontSize = _asDouble(m['fontSize'], 17).clamp(14.0, 26.0).toDouble();
-        lineHeight = _asDouble(m['lineHeight'], 1.6).clamp(1.2, 2.4).toDouble();
-        fontIndex = _clampIndex(_asInt(m['fontIndex'], 0), kFontFamilies.length);
-        isGridMode = _asBool(m['grid'], true);
-        dailyGoal = math.max(1, _asInt(m['dailyGoal'], 500));
-        restReminder = _asBool(m['restReminder'], true);
-        restShownDay = _asString(m['restShownDay'], '');
-        _wordsToday = math.max(0, _asInt(m['wordsToday'], 0));
-        _goalDay = DateTime.tryParse(_asString(m['goalDay'], '')) ??
-            dateOnly(DateTime.now());
-        _goalDay = dateOnly(_goalDay);
-        exportFormat = ExportFormat
-            .values[_clampIndex(_asInt(m['exportFormat'], 4), ExportFormat.values.length)];
-        exportTitle = _asBool(m['exportTitle'], true);
-        exportMeta = _asBool(m['exportMeta'], false);
-        final list = m['checkins'];
-        if (list is List) {
-          for (final e in list) {
-            if (e is String) checkins.add(e);
-          }
-        }
-      }
-    } catch (_) {
-      // Dữ liệu cài đặt hỏng: dùng mặc định.
-    }
-    try {
-      final rawNotes = _prefs.getString('notes');
-      if (rawNotes == null) {
-        notes = _sampleNotes();
-      } else {
-        final list = jsonDecode(rawNotes) as List<dynamic>;
-        notes = list
-            .whereType<Map<String, dynamic>>()
-            .map(Note.fromJson)
-            .toList();
-      }
-    } catch (_) {
-      notes = _sampleNotes();
-    }
-    _sortNotes();
+  @override
+  void initState() {
+    super.initState();
+    _loadStreak();
   }
 
-  void _saveSettings() {
-    _prefs.setString(
-      'settings',
-      jsonEncode({
-        'themeIndex': themeIndex,
-        'bgIndex': bgIndex,
-        'aurora': aurora,
-        'fontSize': fontSize,
-        'lineHeight': lineHeight,
-        'fontIndex': fontIndex,
-        'grid': isGridMode,
-        'dailyGoal': dailyGoal,
-        'restReminder': restReminder,
-        'restShownDay': restShownDay,
-        'wordsToday': _wordsToday,
-        'goalDay': dateKey(_goalDay),
-        'exportFormat': exportFormat.index,
-        'exportTitle': exportTitle,
-        'exportMeta': exportMeta,
-        'checkins': checkins.toList(),
-      }),
-    );
+  Future<void> _loadStreak() async {
+    await _streak.load();
+    if (!mounted) return;
+    setState(() => _streakLoaded = true);
   }
-
-  void _saveNotes() {
-    _prefs.setString(
-      'notes',
-      jsonEncode(notes.map((n) => n.toJson()).toList()),
-    );
-  }
-
-  /// Đổi một cài đặt, lưu và cập nhật giao diện.
-  void change(VoidCallback fn) {
-    fn();
-    _saveSettings();
-    notifyListeners();
-  }
-
-  // ---- số từ hôm nay ----
-  int get todayWords =>
-      dateOnly(DateTime.now()) == _goalDay ? _wordsToday : 0;
 
   void _addWordsToday(int delta) {
     final today = dateOnly(DateTime.now());
@@ -424,976 +598,21 @@ class AppState extends ChangeNotifier {
       _goalDay = today;
       _wordsToday = 0;
     }
-    _wordsToday = math.max(0, _wordsToday + delta);
+    final next = _wordsToday + delta;
+    _wordsToday = next < 0 ? 0 : next;
   }
-
-  bool get restShownToday => restShownDay == dateKey(DateTime.now());
-
-  void markRestShown() {
-    restShownDay = dateKey(DateTime.now());
-    _saveSettings();
-  }
-
-  // ---- điểm danh chuỗi ----
-  bool hasCheckin(DateTime d) => checkins.contains(dateKey(d));
-
-  bool get checkedInToday => hasCheckin(DateTime.now());
-
-  void checkInToday() => change(() => checkins.add(dateKey(DateTime.now())));
-
-  int get streak {
-    var d = dateOnly(DateTime.now());
-    if (!hasCheckin(d)) d = DateTime(d.year, d.month, d.day - 1);
-    var n = 0;
-    while (hasCheckin(d)) {
-      n++;
-      d = DateTime(d.year, d.month, d.day - 1);
-    }
-    return n;
-  }
-
-  int get longestStreak {
-    final days = checkins
-        .map(DateTime.tryParse)
-        .whereType<DateTime>()
-        .map(dateOnly)
-        .toList()
-      ..sort();
-    var best = 0;
-    var run = 0;
-    DateTime? prev;
-    for (final d in days) {
-      if (prev != null && DateTime(prev.year, prev.month, prev.day + 1) == d) {
-        run++;
-      } else {
-        run = 1;
-      }
-      if (run > best) best = run;
-      prev = d;
-    }
-    return best;
-  }
-
-  // ---- bài viết ----
-  void _sortNotes() {
-    notes.sort((a, b) {
-      if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
-      final byDate = b.updatedAt.compareTo(a.updatedAt);
-      if (byDate != 0) return byDate;
-      return b.id.compareTo(a.id);
-    });
-  }
-
-  void saveNote(Note n) {
-    final i = notes.indexWhere((x) => x.id == n.id);
-    if (i >= 0) {
-      _addWordsToday(n.words - notes[i].words);
-      notes[i] = n;
-    } else {
-      _addWordsToday(n.words);
-      notes.add(n);
-    }
-    _sortNotes();
-    _saveNotes();
-    _saveSettings();
-    notifyListeners();
-  }
-
-  void deleteNote(String id) {
-    notes.removeWhere((n) => n.id == id);
-    _saveNotes();
-    notifyListeners();
-  }
-
-  void togglePin(String id) {
-    final i = notes.indexWhere((n) => n.id == id);
-    if (i < 0) return;
-    notes[i] = notes[i].copyWith(isPinned: !notes[i].isPinned);
-    _sortNotes();
-    _saveNotes();
-    notifyListeners();
-  }
-}
-
-// ================= Ô SOẠN THẢO CÓ ĐỊNH DẠNG =================
-class _Snap {
-  _Snap(this.text, this.styles, this.selection);
-  final String text;
-  final List<int> styles;
-  final TextSelection selection;
-}
-
-class RichTextController extends TextEditingController {
-  RichTextController({String text = '', List<int>? styles})
-      : _styles = fitStyles(styles, text.length),
-        super(text: text);
-
-  List<int> _styles;
-  int typingInline = 0;
-  int typingBlock = 0;
-
-  final List<_Snap> _undo = [];
-  final List<_Snap> _redo = [];
-  DateTime _lastEdit = DateTime.fromMillisecondsSinceEpoch(0);
-
-  bool get canUndo => _undo.isNotEmpty;
-  bool get canRedo => _redo.isNotEmpty;
-
-  String encodedStyles() {
-    if (_styles.length != text.length) {
-      _styles = fitStyles(_styles, text.length);
-    }
-    return encodeStyles(_styles);
-  }
-
-  /// Lấy phần định dạng ứng với đoạn [start, end) của văn bản.
-  String encodedStylesRange(int start, int end) {
-    if (_styles.length != text.length) {
-      _styles = fitStyles(_styles, text.length);
-    }
-    return encodeStyles(_styles.sublist(start, end));
-  }
-
-  // ---- Lịch sử hoàn tác ----
-  void _recordUndo({bool force = false}) {
-    final now = DateTime.now();
-    final gap = now.difference(_lastEdit);
-    _lastEdit = now;
-    if (!force && _undo.isNotEmpty && gap.inMilliseconds < 800) {
-      _redo.clear();
-      return;
-    }
-    _undo.add(_Snap(text, List<int>.from(_styles), selection));
-    if (_undo.length > 100) _undo.removeAt(0);
-    _redo.clear();
-  }
-
-  void _restore(_Snap s) {
-    _styles = List<int>.from(s.styles);
-    final sel = s.selection.isValid
-        ? TextSelection(
-            baseOffset: math.min(s.selection.baseOffset, s.text.length),
-            extentOffset: math.min(s.selection.extentOffset, s.text.length),
-          )
-        : TextSelection.collapsed(offset: s.text.length);
-    _syncTyping(s.text, sel);
-    super.value = TextEditingValue(text: s.text, selection: sel);
-    _lastEdit = DateTime.fromMillisecondsSinceEpoch(0);
-  }
-
-  void undo() {
-    if (_undo.isEmpty) return;
-    _redo.add(_Snap(text, List<int>.from(_styles), selection));
-    _restore(_undo.removeLast());
-  }
-
-  void redo() {
-    if (_redo.isEmpty) return;
-    _undo.add(_Snap(text, List<int>.from(_styles), selection));
-    _restore(_redo.removeLast());
-  }
-
-  // ---- Theo dõi thay đổi chữ để giữ định dạng khớp từng ký tự ----
-  @override
-  set value(TextEditingValue newValue) {
-    final old = value;
-    var next = newValue;
-    if (next.text != old.text) {
-      next = _autoContinueList(old, next);
-      _recordUndo();
-      _applyDiff(old.text, next.text);
-      super.value = next;
-      return;
-    }
-    final moved = next.selection.baseOffset != old.selection.baseOffset ||
-        next.selection.extentOffset != old.selection.extentOffset;
-    if (moved) _syncTyping(next.text, next.selection);
-    super.value = next;
-  }
-
-  void _applyDiff(String old, String neu) {
-    if (_styles.length != old.length) {
-      _styles = fitStyles(_styles, old.length);
-    }
-    final minLen = math.min(old.length, neu.length);
-    var p = 0;
-    while (p < minLen && old.codeUnitAt(p) == neu.codeUnitAt(p)) {
-      p++;
-    }
-    var s = 0;
-    while (s < minLen - p &&
-        old.codeUnitAt(old.length - 1 - s) ==
-            neu.codeUnitAt(neu.length - 1 - s)) {
-      s++;
-    }
-    final removeEnd = old.length - s;
-    final insertEnd = neu.length - s;
-
-    var block = typingBlock;
-    if (p > 0 && old.codeUnitAt(p - 1) != 10) {
-      block = (_styles[p - 1] >> 4) & 3;
-    } else if (p < old.length && old.codeUnitAt(p) != 10) {
-      block = (_styles[p] >> 4) & 3;
-    }
-
-    final inserted = neu.substring(p, insertEnd);
-    final added = <int>[];
-    for (var i = 0; i < inserted.length; i++) {
-      added.add(typingInline | (block << 4));
-      if (inserted.codeUnitAt(i) == 10) block = 0; // sau Enter: dòng thường
-    }
-    typingBlock = block;
-    _styles.replaceRange(p, removeEnd, added);
-    if (_styles.length != neu.length) {
-      _styles = fitStyles(_styles, neu.length);
-    }
-  }
-
-  /// Nhấn Enter trên dòng bắt đầu bằng "• " thì tự thêm gạch đầu dòng mới;
-  /// nhấn Enter trên dòng chỉ có "• " thì bỏ gạch đầu dòng.
-  TextEditingValue _autoContinueList(TextEditingValue old, TextEditingValue next) {
-    final t = next.text;
-    final cursor = next.selection.baseOffset;
-    if (!next.selection.isCollapsed ||
-        t.length != old.text.length + 1 ||
-        cursor < 1 ||
-        cursor > t.length ||
-        t.codeUnitAt(cursor - 1) != 10) {
-      return next;
-    }
-    if (old.text != t.substring(0, cursor - 1) + t.substring(cursor)) {
-      return next;
-    }
-    final lineStart = cursor - 1 == 0 ? 0 : t.lastIndexOf('\n', cursor - 2) + 1;
-    final line = t.substring(lineStart, cursor - 1);
-    if (line == '• ') {
-      return next.copyWith(
-        text: t.substring(0, lineStart) + t.substring(cursor),
-        selection: TextSelection.collapsed(offset: lineStart),
-        composing: TextRange.empty,
-      );
-    }
-    if (line.startsWith('• ')) {
-      return next.copyWith(
-        text: '${t.substring(0, cursor)}• ${t.substring(cursor)}',
-        selection: TextSelection.collapsed(offset: cursor + 2),
-        composing: TextRange.empty,
-      );
-    }
-    return next;
-  }
-
-  void _syncTyping(String t, TextSelection sel) {
-    if (!sel.isValid || !sel.isCollapsed) return;
-    if (_styles.length != t.length) _styles = fitStyles(_styles, t.length);
-    final pos = math.max(0, math.min(sel.baseOffset, t.length));
-    if (pos > 0 && t.codeUnitAt(pos - 1) != 10) {
-      final s = _styles[pos - 1];
-      typingInline = s & 15;
-      typingBlock = (s >> 4) & 3;
-    } else if (pos < t.length && t.codeUnitAt(pos) != 10) {
-      final s = _styles[pos];
-      typingInline = s & 15;
-      typingBlock = (s >> 4) & 3;
-    } else {
-      typingInline = 0;
-      typingBlock = 0;
-    }
-  }
-
-  // ---- Trạng thái nút trên thanh công cụ ----
-  bool isInlineActive(int bit) {
-    final t = text;
-    final sel = selection;
-    if (sel.isValid && !sel.isCollapsed && _styles.length == t.length) {
-      var any = false;
-      for (var i = sel.start; i < sel.end; i++) {
-        if (t.codeUnitAt(i) == 10) continue;
-        any = true;
-        if ((_styles[i] & bit) == 0) return false;
-      }
-      return any;
-    }
-    return (typingInline & bit) != 0;
-  }
-
-  int get activeBlock {
-    final t = text;
-    final sel = selection;
-    if (!sel.isValid || _styles.length != t.length) return typingBlock;
-    final pos = math.min(sel.start, t.length);
-    if (pos > 0 && t.codeUnitAt(pos - 1) != 10) {
-      return (_styles[pos - 1] >> 4) & 3;
-    }
-    if (pos < t.length && t.codeUnitAt(pos) != 10) {
-      return (_styles[pos] >> 4) & 3;
-    }
-    return typingBlock;
-  }
-
-  // ---- Thao tác định dạng ----
-  void toggleInline(int bit) {
-    final t = text;
-    final sel = selection;
-    if (!sel.isValid || sel.isCollapsed || _styles.length != t.length) {
-      typingInline ^= bit;
-      notifyListeners();
-      return;
-    }
-    final makeOn = !isInlineActive(bit);
-    _recordUndo(force: true);
-    for (var i = sel.start; i < sel.end; i++) {
-      if (t.codeUnitAt(i) == 10) continue;
-      _styles[i] = makeOn ? (_styles[i] | bit) : (_styles[i] & ~bit);
-    }
-    notifyListeners();
-  }
-
-  (int, int) _lineRange() {
-    final t = text;
-    final sel = selection;
-    final a = sel.isValid ? math.min(sel.start, t.length) : t.length;
-    final b = sel.isValid ? math.min(sel.end, t.length) : t.length;
-    final ls = a == 0 ? 0 : t.lastIndexOf('\n', a - 1) + 1;
-    final endRef = b > a ? b - 1 : b;
-    var le = t.indexOf('\n', endRef);
-    if (le == -1) le = t.length;
-    return (ls, le);
-  }
-
-  void setBlock(int target) {
-    if (_styles.length != text.length) {
-      _styles = fitStyles(_styles, text.length);
-    }
-    final applied = activeBlock == target ? 0 : target;
-    _recordUndo(force: true);
-    final (ls, le) = _lineRange();
-    for (var i = ls; i < le; i++) {
-      _styles[i] = (_styles[i] & 15) | (applied << 4);
-    }
-    typingBlock = applied;
-    notifyListeners();
-  }
-
-  void toggleBullet() {
-    final t = text;
-    final sel = selection;
-    final pos = sel.isValid ? math.min(sel.start, t.length) : t.length;
-    final ls = pos == 0 ? 0 : t.lastIndexOf('\n', pos - 1) + 1;
-    final has = t.startsWith('• ', ls);
-    final newText = has ? t.replaceRange(ls, ls + 2, '') : t.replaceRange(ls, ls, '• ');
-    final newPos = has ? math.max(ls, pos - 2) : pos + 2;
-    final keepInline = typingInline;
-    typingInline = 0;
-    value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: newPos),
-    );
-    typingInline = keepInline;
-    notifyListeners();
-  }
-
-  void clearFormatting() {
-    final t = text;
-    final sel = selection;
-    if (_styles.length != t.length) _styles = fitStyles(_styles, t.length);
-    _recordUndo(force: true);
-    if (sel.isValid && !sel.isCollapsed) {
-      for (var i = sel.start; i < sel.end; i++) {
-        _styles[i] = _styles[i] & ~15;
-      }
-    }
-    final (ls, le) = _lineRange();
-    for (var i = ls; i < le; i++) {
-      _styles[i] = _styles[i] & 15;
-    }
-    typingInline = 0;
-    typingBlock = 0;
-    notifyListeners();
-  }
-
-  // ---- Vẽ chữ theo định dạng ----
-  TextStyle _styleFor(int key, TextStyle base) {
-    final size = base.fontSize ?? 16;
-    var s = base;
-    final block = (key >> 4) & 3;
-    if (block == 1) {
-      s = s.copyWith(fontSize: size * 1.75, fontWeight: FontWeight.w800, height: 1.3);
-    } else if (block == 2) {
-      s = s.copyWith(fontSize: size * 1.4, fontWeight: FontWeight.w700, height: 1.35);
-    } else if (block == 3) {
-      s = s.copyWith(fontSize: size * 1.15, fontWeight: FontWeight.w700, height: 1.4);
-    }
-    if ((key & kBold) != 0) s = s.copyWith(fontWeight: FontWeight.w800);
-    if ((key & kItalic) != 0) s = s.copyWith(fontStyle: FontStyle.italic);
-    final decorations = <TextDecoration>[];
-    if ((key & kUnderline) != 0 || (key & 256) != 0) {
-      decorations.add(TextDecoration.underline);
-    }
-    if ((key & kStrike) != 0) decorations.add(TextDecoration.lineThrough);
-    if (decorations.isNotEmpty) {
-      s = s.copyWith(decoration: TextDecoration.combine(decorations));
-    }
-    return s;
-  }
-
-  @override
-  TextSpan buildTextSpan({
-    required BuildContext context,
-    TextStyle? style,
-    required bool withComposing,
-  }) {
-    final base = style ?? const TextStyle();
-    final t = text;
-    if (t.isEmpty) return TextSpan(style: base, text: '');
-    if (_styles.length != t.length) _styles = fitStyles(_styles, t.length);
-    final comp = value.composing;
-    final hasComp = withComposing && value.isComposingRangeValid && !comp.isCollapsed;
-    int keyAt(int i) =>
-        _styles[i] | ((hasComp && i >= comp.start && i < comp.end) ? 256 : 0);
-
-    final spans = <InlineSpan>[];
-    var start = 0;
-    while (start < t.length) {
-      final k = keyAt(start);
-      var end = start + 1;
-      while (end < t.length && keyAt(end) == k) {
-        end++;
-      }
-      spans.add(TextSpan(text: t.substring(start, end), style: _styleFor(k, base)));
-      start = end;
-    }
-    return TextSpan(style: base, children: spans);
-  }
-}
-
-// ================= NỀN LOANG MỀM =================
-class AuroraBackground extends StatelessWidget {
-  const AuroraBackground({
-    super.key,
-    required this.color,
-    required this.base,
-    required this.enabled,
-    this.intensity = 1.0,
-  });
-
-  final Color color;
-  final Color base;
-  final bool enabled;
-  final double intensity;
-
-  /// Gradient mờ dần theo đường cong mượt (smoothstep), không có viền cứng.
-  static RadialGradient _soft(Color c, double alpha, Alignment center, double radius) {
-    const steps = 14;
-    final colors = <Color>[];
-    final stops = <double>[];
-    for (var i = 0; i <= steps; i++) {
-      final t = i / steps;
-      final k = t * t * (3 - 2 * t);
-      colors.add(c.fade(alpha * (1 - k)));
-      stops.add(t);
-    }
-    return RadialGradient(center: center, radius: radius, colors: colors, stops: stops);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Stack(
-      children: [
-        Positioned.fill(child: ColoredBox(color: base)),
-        if (enabled)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: TweenAnimationBuilder<Color?>(
-                tween: ColorTween(end: color),
-                duration: const Duration(milliseconds: 500),
-                builder: (context, c, _) {
-                  final main = c ?? color;
-                  final hsl = HSLColor.fromColor(main);
-                  final second = hsl
-                      .withHue((hsl.hue + 45) % 360)
-                      .withSaturation((hsl.saturation * 0.8).clamp(0.0, 1.0))
-                      .toColor();
-                  return Stack(
-                    children: [
-                      Positioned.fill(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: _soft(main, 0.30 * intensity,
-                                const Alignment(-0.95, -1.0), 1.25),
-                          ),
-                        ),
-                      ),
-                      Positioned.fill(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: _soft(second, 0.16 * intensity,
-                                const Alignment(1.0, 0.95), 1.1),
-                          ),
-                        ),
-                      ),
-                    ],
-                  );
-                },
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-// ================= XUẤT FILE =================
-class _Run {
-  const _Run(this.text, this.style);
-  final String text;
-  final int style;
-}
-
-class _Line {
-  const _Line(this.block, this.runs);
-  final int block;
-  final List<_Run> runs;
-  bool get isEmpty => runs.isEmpty;
-  String get plain => runs.map((r) => r.text).join();
-}
-
-List<_Line> _parseLines(Note n) {
-  final text = n.content;
-  final styles = decodeStyles(n.styles, text.length);
-  final lines = <_Line>[];
-  var start = 0;
-  while (true) {
-    final nl = text.indexOf('\n', start);
-    final end = nl == -1 ? text.length : nl;
-    var block = 0;
-    final runs = <_Run>[];
-    var i = start;
-    while (i < end) {
-      if (i == start) block = (styles[i] >> 4) & 3;
-      final inl = styles[i] & 15;
-      var j = i + 1;
-      while (j < end && (styles[j] & 15) == inl) {
-        j++;
-      }
-      runs.add(_Run(text.substring(i, j), inl));
-      i = j;
-    }
-    lines.add(_Line(block, runs));
-    if (nl == -1) break;
-    start = nl + 1;
-  }
-  return lines;
-}
-
-String _metaOf(Note n) => '${formatDateLong(n.updatedAt)} · ${n.words} từ';
-
-String _escHtml(String s) =>
-    s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-
-String _escXml(String s) => _escHtml(s).replaceAll('"', '&quot;');
-
-String _mdWrap(String text, int style) {
-  if (text.trim().isEmpty || (style & 15) == 0) return text;
-  final lead = text.substring(0, text.length - text.trimLeft().length);
-  final trail = text.substring(text.trimRight().length);
-  var core = text.trim();
-  if ((style & kStrike) != 0) core = '~~$core~~';
-  if ((style & kUnderline) != 0) core = '<u>$core</u>';
-  if ((style & kBold) != 0 && (style & kItalic) != 0) {
-    core = '***$core***';
-  } else if ((style & kBold) != 0) {
-    core = '**$core**';
-  } else if ((style & kItalic) != 0) {
-    core = '*$core*';
-  }
-  return '$lead$core$trail';
-}
-
-String exportText(ExportFormat f, List<Note> notes, bool withTitle, bool withMeta) {
-  switch (f) {
-    case ExportFormat.txt:
-      return _toTxt(notes, withTitle, withMeta);
-    case ExportFormat.md:
-      return _toMd(notes, withTitle, withMeta);
-    case ExportFormat.html:
-      return _toHtml(notes, withTitle, withMeta);
-    case ExportFormat.rtf:
-      return _toRtf(notes, withTitle, withMeta);
-    case ExportFormat.json:
-      return const JsonEncoder.withIndent('  ').convert({
-        'app': 'Novel App',
-        'exportedAt': DateTime.now().toIso8601String(),
-        'notes': [
-          for (final n in notes)
-            {
-              'title': n.title,
-              'content': n.content,
-              'words': n.words,
-              'updatedAt': n.updatedAt.toIso8601String(),
-              'pinned': n.isPinned,
-            }
-        ],
-      });
-    case ExportFormat.csv:
-      return _toCsv(notes);
-    case ExportFormat.docx:
-      return '';
-  }
-}
-
-String _toTxt(List<Note> notes, bool withTitle, bool withMeta) {
-  final parts = <String>[];
-  for (final n in notes) {
-    final b = StringBuffer();
-    if (withTitle) b.writeln(n.title);
-    if (withMeta) b.writeln(_metaOf(n));
-    if (withTitle || withMeta) b.writeln();
-    b.write(n.content);
-    parts.add(b.toString());
-  }
-  return parts.join('\n\n--------------------\n\n');
-}
-
-String _toMd(List<Note> notes, bool withTitle, bool withMeta) {
-  final parts = <String>[];
-  for (final n in notes) {
-    final b = StringBuffer();
-    if (withTitle) b.writeln('# ${n.title}\n');
-    if (withMeta) b.writeln('_${_metaOf(n)}_\n');
-    final lines = _parseLines(n).where((l) => !l.isEmpty).toList();
-    for (var i = 0; i < lines.length; i++) {
-      final l = lines[i];
-      var body = l.runs.map((r) => _mdWrap(r.text, r.style)).join();
-      var prefix = '';
-      if (l.block == 1) prefix = '## ';
-      if (l.block == 2) prefix = '### ';
-      if (l.block == 3) prefix = '#### ';
-      final isBullet = l.plain.startsWith('• ');
-      if (isBullet) {
-        body = body.replaceFirst('• ', '- ');
-      }
-      b.write('$prefix$body');
-      final nextBullet = i + 1 < lines.length && lines[i + 1].plain.startsWith('• ');
-      b.write(isBullet && nextBullet ? '\n' : '\n\n');
-    }
-    parts.add(b.toString().trimRight());
-  }
-  return parts.join('\n\n---\n\n');
-}
-
-String _toHtml(List<Note> notes, bool withTitle, bool withMeta) {
-  final b = StringBuffer()
-    ..writeln('<!DOCTYPE html>')
-    ..writeln('<html lang="vi"><head><meta charset="utf-8">')
-    ..writeln('<meta name="viewport" content="width=device-width, initial-scale=1">')
-    ..writeln('<title>Novel App</title>')
-    ..writeln('<style>body{font-family:Georgia,serif;max-width:720px;margin:2em auto;padding:0 1em;line-height:1.7;color:#222}'
-        'h1,h2,h3,h4{line-height:1.3}.meta{color:#888;font-size:.85em}article{margin-bottom:3em}</style>')
-    ..writeln('</head><body>');
-  for (final n in notes) {
-    b.writeln('<article>');
-    if (withTitle) b.writeln('<h1>${_escHtml(n.title)}</h1>');
-    if (withMeta) b.writeln('<p class="meta">${_escHtml(_metaOf(n))}</p>');
-    for (final l in _parseLines(n)) {
-      if (l.isEmpty) {
-        b.writeln('<p>&nbsp;</p>');
-        continue;
-      }
-      final inner = StringBuffer();
-      for (final r in l.runs) {
-        var s = _escHtml(r.text);
-        if ((r.style & kStrike) != 0) s = '<s>$s</s>';
-        if ((r.style & kUnderline) != 0) s = '<u>$s</u>';
-        if ((r.style & kItalic) != 0) s = '<em>$s</em>';
-        if ((r.style & kBold) != 0) s = '<strong>$s</strong>';
-        inner.write(s);
-      }
-      final tag = const {1: 'h2', 2: 'h3', 3: 'h4'}[l.block] ?? 'p';
-      b.writeln('<$tag>$inner</$tag>');
-    }
-    b.writeln('</article>');
-  }
-  b.writeln('</body></html>');
-  return b.toString();
-}
-
-String _rtfEsc(String t) {
-  final b = StringBuffer();
-  for (final u in t.codeUnits) {
-    if (u == 0x5C) {
-      b.write('\\\\');
-    } else if (u == 0x7B) {
-      b.write('\\{');
-    } else if (u == 0x7D) {
-      b.write('\\}');
-    } else if (u < 128) {
-      b.writeCharCode(u);
-    } else {
-      final v = u > 32767 ? u - 65536 : u;
-      b.write('\\u$v?');
-    }
-  }
-  return b.toString();
-}
-
-String _toRtf(List<Note> notes, bool withTitle, bool withMeta) {
-  final b = StringBuffer(r'{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0 Calibri;}}\uc1 ');
-  for (var k = 0; k < notes.length; k++) {
-    final n = notes[k];
-    if (k > 0) b.write(r'\page ');
-    if (withTitle) b.write('{\\pard\\sa160\\fs44\\b ${_rtfEsc(n.title)}\\b0\\par}');
-    if (withMeta) b.write('{\\pard\\sa160\\fs20\\i ${_rtfEsc(_metaOf(n))}\\i0\\par}');
-    for (final l in _parseLines(n)) {
-      final size = const {1: 36, 2: 30, 3: 26}[l.block] ?? 24;
-      b.write('{\\pard\\sa120\\fs$size ');
-      if (l.block != 0) b.write(r'\b ');
-      for (final r in l.runs) {
-        final open = StringBuffer('{');
-        if ((r.style & kBold) != 0) open.write(r'\b ');
-        if ((r.style & kItalic) != 0) open.write(r'\i ');
-        if ((r.style & kUnderline) != 0) open.write(r'\ul ');
-        if ((r.style & kStrike) != 0) open.write(r'\strike ');
-        if (open.length == 1) {
-          b.write(_rtfEsc(r.text));
-        } else {
-          b.write('$open${_rtfEsc(r.text)}}');
-        }
-      }
-      b.write(r'\par}');
-    }
-  }
-  b.write('}');
-  return b.toString();
-}
-
-String _toCsv(List<Note> notes) {
-  String q(String s) => '"${s.replaceAll('"', '""')}"';
-  final b = StringBuffer('Tiêu đề,Số từ,Cập nhật,Nội dung\r\n');
-  for (final n in notes) {
-    b.write('${q(n.title)},${n.words},${q(formatDateLong(n.updatedAt))},${q(n.content)}\r\n');
-  }
-  return b.toString();
-}
-
-// ---- DOCX (tự đóng gói, không cần thư viện ngoài) ----
-String _docxRun(String text, int style, int size, {bool bold = false}) {
-  final b = StringBuffer('<w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/>');
-  if (bold || (style & kBold) != 0) b.write('<w:b/>');
-  if ((style & kItalic) != 0) b.write('<w:i/>');
-  if ((style & kStrike) != 0) b.write('<w:strike/>');
-  b.write('<w:sz w:val="$size"/><w:szCs w:val="$size"/>');
-  if ((style & kUnderline) != 0) b.write('<w:u w:val="single"/>');
-  b.write('</w:rPr><w:t xml:space="preserve">${_escXml(text)}</w:t></w:r>');
-  return b.toString();
-}
-
-Uint8List exportDocx(List<Note> notes, bool withTitle, bool withMeta) {
-  final body = StringBuffer();
-  for (var k = 0; k < notes.length; k++) {
-    final n = notes[k];
-    if (k > 0) body.write('<w:p><w:r><w:br w:type="page"/></w:r></w:p>');
-    if (withTitle) {
-      body.write('<w:p><w:pPr><w:spacing w:after="160"/><w:outlineLvl w:val="0"/></w:pPr>'
-          '${_docxRun(n.title, 0, 44, bold: true)}</w:p>');
-    }
-    if (withMeta) {
-      body.write('<w:p><w:pPr><w:spacing w:after="160"/></w:pPr>'
-          '${_docxRun(_metaOf(n), kItalic, 20)}</w:p>');
-    }
-    for (final l in _parseLines(n)) {
-      final size = const {1: 36, 2: 30, 3: 26}[l.block] ?? 24;
-      final outline = l.block == 0 ? '' : '<w:outlineLvl w:val="${l.block}"/>';
-      body.write('<w:p><w:pPr><w:spacing w:after="120"/>$outline</w:pPr>');
-      for (final r in l.runs) {
-        body.write(_docxRun(r.text, r.style, size, bold: l.block != 0));
-      }
-      body.write('</w:p>');
-    }
-  }
-  const head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-  final files = <String, List<int>>{
-    '[Content_Types].xml': utf8.encode('$head<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-        '<Default Extension="xml" ContentType="application/xml"/>'
-        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
-        '</Types>'),
-    '_rels/.rels': utf8.encode('$head<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
-        '</Relationships>'),
-    'word/document.xml': utf8.encode('$head<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        '<w:body>$body<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
-        '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
-        '</w:sectPr></w:body></w:document>'),
-  };
-  return _zipStored(files);
-}
-
-List<int> _u16(int v) => [v & 255, (v >> 8) & 255];
-List<int> _u32(int v) => [v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255];
-
-final List<int> _crcTable = () {
-  final table = List<int>.filled(256, 0);
-  for (var n = 0; n < 256; n++) {
-    var c = n;
-    for (var k = 0; k < 8; k++) {
-      c = (c & 1) != 0 ? (0xEDB88320 ^ (c >> 1)) : (c >> 1);
-    }
-    table[n] = c;
-  }
-  return table;
-}();
-
-int _crc32(List<int> data) {
-  var c = 0xFFFFFFFF;
-  for (final b in data) {
-    c = _crcTable[(c ^ b) & 255] ^ (c >> 8);
-  }
-  return (c ^ 0xFFFFFFFF) & 0xFFFFFFFF;
-}
-
-/// Đóng gói ZIP không nén (đủ để Word/Google Docs mở được file .docx).
-Uint8List _zipStored(Map<String, List<int>> files) {
-  final out = BytesBuilder();
-  final central = BytesBuilder();
-  var count = 0;
-  files.forEach((name, data) {
-    final nameBytes = utf8.encode(name);
-    final crc = _crc32(data);
-    final offset = out.length;
-    out
-      ..add(_u32(0x04034B50))
-      ..add(_u16(20))
-      ..add(_u16(0x0800))
-      ..add(_u16(0))
-      ..add(_u16(0))
-      ..add(_u16(0x21))
-      ..add(_u32(crc))
-      ..add(_u32(data.length))
-      ..add(_u32(data.length))
-      ..add(_u16(nameBytes.length))
-      ..add(_u16(0))
-      ..add(nameBytes)
-      ..add(data);
-    central
-      ..add(_u32(0x02014B50))
-      ..add(_u16(20))
-      ..add(_u16(20))
-      ..add(_u16(0x0800))
-      ..add(_u16(0))
-      ..add(_u16(0))
-      ..add(_u16(0x21))
-      ..add(_u32(crc))
-      ..add(_u32(data.length))
-      ..add(_u32(data.length))
-      ..add(_u16(nameBytes.length))
-      ..add(_u16(0))
-      ..add(_u16(0))
-      ..add(_u16(0))
-      ..add(_u16(0))
-      ..add(_u32(0))
-      ..add(_u32(offset))
-      ..add(nameBytes);
-    count++;
-  });
-  final centralBytes = central.toBytes();
-  final centralOffset = out.length;
-  out
-    ..add(centralBytes)
-    ..add(_u32(0x06054B50))
-    ..add(_u16(0))
-    ..add(_u16(0))
-    ..add(_u16(count))
-    ..add(_u16(count))
-    ..add(_u32(centralBytes.length))
-    ..add(_u32(centralOffset))
-    ..add(_u16(0));
-  return out.toBytes();
-}
-
-String _safeFileName(String s) {
-  final cleaned = s.replaceAll(RegExp(r'[\\/:*?"<>|\n\r\t]'), ' ').trim();
-  if (cleaned.isEmpty) return 'novel_app';
-  return cleaned.length > 60 ? cleaned.substring(0, 60).trim() : cleaned;
-}
-
-Future<void> shareExport(AppState s, List<Note> notes) async {
-  final f = s.exportFormat;
-  final List<int> bytes;
-  if (f == ExportFormat.docx) {
-    bytes = exportDocx(notes, s.exportTitle, s.exportMeta);
-  } else {
-    final text = exportText(f, notes, s.exportTitle, s.exportMeta);
-    bytes = [if (f == ExportFormat.csv) ...[0xEF, 0xBB, 0xBF], ...utf8.encode(text)];
-  }
-  final base = notes.length == 1
-      ? _safeFileName(notes.first.title)
-      : 'novel_app_${dateKey(DateTime.now())}';
-  final dir = await Directory.systemTemp.createTemp('novel_export');
-  final file = File('${dir.path}/$base.${f.ext}');
-  await file.writeAsBytes(bytes, flush: true);
-  await Share.shareXFiles(
-    [XFile(file.path, mimeType: f.mime)],
-    subject: '$base.${f.ext}',
-  );
-}
-
-// ================= GỐC ỨNG DỤNG =================
-class NovelApp extends StatelessWidget {
-  const NovelApp({super.key, required this.state});
-
-  final AppState state;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: state,
-      builder: (context, _) {
-        final color = state.themeColor;
-        return MaterialApp(
-          title: 'Novel App',
-          debugShowCheckedModeBanner: false,
-          theme: ThemeData.dark().copyWith(
-            scaffoldBackgroundColor: state.bgColor,
-            primaryColor: color,
-            colorScheme: ColorScheme.dark(primary: color),
-          ),
-          home: HomeScreen(state: state),
-        );
-      },
-    );
-  }
-}
-
-// ================= MÀN HÌNH CHÍNH =================
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.state});
-
-  final AppState state;
-
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
-}
-
-class _HomeScreenState extends State<HomeScreen> {
-  String _searchQuery = '';
-
-  AppState get s => widget.state;
 
   void _showAboutDialog() {
     showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF16161C),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        title: Row(
-          children: [
-            Icon(Icons.bolt, color: s.themeColor),
-            const SizedBox(width: 8),
-            const Text('Azrael Novel App',
-                style: TextStyle(fontSize: 18, color: Colors.white)),
-          ],
-        ),
+        title: Row(children: [
+          Icon(Icons.bolt, color: widget.themeColor),
+          const SizedBox(width: 8),
+          const Text('Azrael Novel App', style: TextStyle(fontSize: 18, color: Colors.white)),
+        ]),
         content: Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
@@ -1401,15 +620,14 @@ class _HomeScreenState extends State<HomeScreen> {
             borderRadius: BorderRadius.circular(16),
           ),
           child: const Text(
-            '"app được thiết kế và thực hiện bởi azrael.!!!, hãy trải nghiệm và thả hồn vào từng con chữ"',
-            style: TextStyle(
-                color: Colors.white70, fontStyle: FontStyle.italic, height: 1.4),
+            '"App được thiết kế và thực hiện bởi azrael. Hãy trải nghiệm và thả hồn vào từng con chữ."',
+            style: TextStyle(color: Colors.white70, fontStyle: FontStyle.italic, height: 1.4),
           ),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text('Trải nghiệm ngay', style: TextStyle(color: s.themeColor)),
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('Trải nghiệm ngay', style: TextStyle(color: widget.themeColor)),
           ),
         ],
       ),
@@ -1417,89 +635,187 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _showGoalDialog() async {
-    final result = await showDialog<_GoalResult>(
+    final goal = await showDialog<int>(
       context: context,
-      builder: (context) => _GoalDialog(
-        initialGoal: s.dailyGoal,
-        initialRemind: s.restReminder,
-        themeColor: s.themeColor,
-      ),
+      builder: (ctx) => _GoalDialog(initialGoal: _dailyGoal, themeColor: widget.themeColor),
     );
-    if (result == null || !mounted) return;
-    s.change(() {
-      s.dailyGoal = result.goal;
-      s.restReminder = result.remind;
-    });
+    if (goal == null || !mounted) return;
+    await widget.settings.saveDailyGoal(goal);
+    setState(() {});
   }
 
   Future<void> _confirmDelete(Note note) async {
-    final confirmed = await showDialog<bool>(
+    final ok = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF16161C),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        title: const Text('Xóa bài viết?',
-            style: TextStyle(color: Colors.white, fontSize: 16)),
+        title: const Text('Xóa bài viết?', style: TextStyle(color: Colors.white, fontSize: 16)),
         content: Text('"${note.title}" sẽ bị xóa vĩnh viễn.',
             style: const TextStyle(color: Colors.white70)),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: () => Navigator.pop(ctx, false),
             child: const Text('Hủy', style: TextStyle(color: Colors.white54)),
           ),
           TextButton(
-            onPressed: () => Navigator.pop(context, true),
+            onPressed: () => Navigator.pop(ctx, true),
             child: const Text('Xóa', style: TextStyle(color: Colors.redAccent)),
           ),
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
-    s.deleteNote(note.id);
+    if (ok != true || !mounted) return;
+    setState(() => _notes.removeWhere((n) => n.id == note.id));
   }
 
   Future<void> _openEditor([Note? note]) async {
     final result = await Navigator.of(context).push<Note>(
-      MaterialPageRoute<Note>(
-        builder: (context) => EditorScreen(note: note, state: s),
-      ),
+      MaterialPageRoute(builder: (_) => EditorScreen(note: note, themeColor: widget.themeColor)),
     );
     if (result == null || !mounted) return;
-    s.saveNote(result);
+
+    setState(() {
+      final i = _notes.indexWhere((n) => n.id == result.id);
+      if (i >= 0) {
+        _addWordsToday(result.words - _notes[i].words);
+        _notes[i] = result;
+      } else {
+        _addWordsToday(result.words);
+        _notes.add(result);
+      }
+      _sortNotes();
+    });
+
+    // Streak: check-in nếu đã viết được gì đó
+    if (result.words > 0) {
+      final newlyChecked = await _streak.checkInToday();
+      if (newlyChecked && mounted) {
+        setState(() {});
+      }
+    }
+
+    // Nhắc nghỉ ngơi nếu vượt mục tiêu
+    if (_dailyGoal > 0 && _todayWords > _dailyGoal && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _showRestReminder();
+      });
+    }
+  }
+
+  void _showRestReminder() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF16161C),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        title: Row(children: [
+          Icon(Icons.self_improvement, color: widget.themeColor),
+          const SizedBox(width: 8),
+          const Text('Nghỉ ngơi chút nhé!', style: TextStyle(fontSize: 16, color: Colors.white)),
+        ]),
+        content: Text(
+          'Bạn đã viết $_todayWords từ hôm nay, vượt mục tiêu $_dailyGoal từ rồi đó. '
+          'Hãy đứng dậy, uống chút nước và thư giãn đôi mắt nhé. Sức khỏe quan trọng hơn con số!',
+          style: const TextStyle(color: Colors.white70, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('Cảm ơn, mình sẽ nghỉ', style: TextStyle(color: widget.themeColor)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _togglePin(String id) {
+    setState(() {
+      final i = _notes.indexWhere((n) => n.id == id);
+      if (i < 0) return;
+      _notes[i] = _notes[i].copyWith(isPinned: !_notes[i].isPinned);
+      _sortNotes();
+    });
+  }
+
+  void _sortNotes() {
+    _notes.sort((a, b) {
+      if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
+      final byDate = b.updatedAt.compareTo(a.updatedAt);
+      if (byDate != 0) return byDate;
+      return b.id.compareTo(a.id);
+    });
+  }
+
+  void _openMenu() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => _SettingsMenuSheet(
+        themeColor: widget.themeColor,
+        currentThemeIndex: widget.settings.themeIndex,
+        onThemeIndexChanged: (i) {
+          widget.onThemeIndexChanged(i);
+          Navigator.pop(context);
+          // Reopen with new color after a tick so theme actually updated
+          Future.delayed(const Duration(milliseconds: 120), () {
+            if (mounted) _openMenu();
+          });
+        },
+        currentGoal: _dailyGoal,
+        onGoalChanged: (g) async {
+          await widget.settings.saveDailyGoal(g);
+          if (!mounted) return;
+          setState(() {});
+        },
+        streak: _streak,
+        streakLoaded: _streakLoaded,
+        onExport: _openExportSheet,
+      ),
+    );
+  }
+
+  void _openExportSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _ExportSheet(
+        themeColor: widget.themeColor,
+        notes: _notes,
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final query = _searchQuery.trim().toLowerCase();
-    final filteredNotes = s.notes.where((n) {
-      return n.title.toLowerCase().contains(query) ||
-          n.content.toLowerCase().contains(query);
+    final q = _searchQuery.trim().toLowerCase();
+    final filtered = _notes.where((n) {
+      final plain = stripMarkdown(n.content).toLowerCase();
+      return n.title.toLowerCase().contains(q) || plain.contains(q);
     }).toList();
 
-    final todayWords = s.todayWords;
-    final ratio = s.dailyGoal > 0 ? todayWords / s.dailyGoal : 0.0;
+    final today = _todayWords;
+    final ratio = _dailyGoal > 0 ? today / _dailyGoal : 0.0;
     final progress = ratio > 1.0 ? 1.0 : ratio;
+    final exceeded = _dailyGoal > 0 && today > _dailyGoal;
 
     return Scaffold(
-      backgroundColor: Colors.transparent,
       body: Stack(
         children: [
-          AuroraBackground(
-            color: s.themeColor,
-            base: s.bgColor,
-            enabled: s.aurora,
-          ),
+          _AmbientBackground(themeColor: widget.themeColor),
           SafeArea(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Column(
                 children: [
                   const SizedBox(height: 8),
-                  _buildHeader(todayWords, progress),
+                  _buildHeader(today, progress, exceeded),
                   const SizedBox(height: 16),
                   _buildSearchField(),
                   const SizedBox(height: 16),
-                  Expanded(child: _buildNotesView(filteredNotes)),
+                  Expanded(child: _buildNotesView(filtered)),
                 ],
               ),
             ),
@@ -1507,7 +823,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton(
-        backgroundColor: s.themeColor,
+        backgroundColor: widget.themeColor,
         tooltip: 'Viết bài mới',
         onPressed: () => _openEditor(),
         child: const Icon(Icons.add, color: Colors.white, size: 28),
@@ -1515,33 +831,31 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildHeader(int todayWords, double progress) {
-    final over = todayWords > s.dailyGoal;
+  Widget _buildHeader(int todayWords, double progress, bool exceeded) {
     return Row(
       children: [
         Container(
           padding: const EdgeInsets.all(4),
           decoration: BoxDecoration(
-            color: Colors.white.fade(0.08),
+            color: Colors.white.fade(0.06),
             borderRadius: BorderRadius.circular(30),
             border: Border.all(color: Colors.white12),
           ),
-          child: Row(
-            children: [
-              IconButton(
-                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                tooltip: 'Giới thiệu',
-                icon: Icon(Icons.bolt, color: s.themeColor, size: 20),
-                onPressed: _showAboutDialog,
-              ),
-              IconButton(
-                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                tooltip: 'Menu: giao diện, xuất file, điểm danh',
-                icon: const Icon(Icons.star_rounded, color: Colors.amber, size: 22),
-                onPressed: () => showAppMenu(context, s),
-              ),
-            ],
-          ),
+          child: Row(children: [
+            IconButton(
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              tooltip: 'Giới thiệu',
+              icon: Icon(Icons.bolt, color: widget.themeColor, size: 20),
+              onPressed: _showAboutDialog,
+            ),
+            // Nút ngôi sao giờ mở MENU (đúng như yêu cầu)
+            IconButton(
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              tooltip: 'Menu cài đặt',
+              icon: Icon(Icons.star_rounded, color: widget.themeColor, size: 20),
+              onPressed: _openMenu,
+            ),
+          ]),
         ),
         const SizedBox(width: 8),
         Expanded(
@@ -1550,35 +864,33 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
-                color: Colors.white.fade(0.06),
+                color: exceeded ? Colors.orangeAccent.fade(0.12) : Colors.white.fade(0.06),
                 borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white12),
+                border: Border.all(color: exceeded ? Colors.orangeAccent.fade(0.4) : Colors.white12),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('chào mừng đã đến với app',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white)),
-                  const SizedBox(height: 2),
                   Text(
-                    'Hôm nay: $todayWords / ${s.dailyGoal} từ${over ? ' · vượt mục tiêu' : ''}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                    exceeded ? 'Đã vượt mục tiêu — nghỉ chút nhé!' : 'Chào mừng đã đến với app',
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                        fontSize: 10,
-                        color: over ? Colors.amber : Colors.white70),
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: exceeded ? Colors.orangeAccent : Colors.white,
+                    ),
                   ),
+                  const SizedBox(height: 2),
+                  Text('Hôm nay: $todayWords / $_dailyGoal từ',
+                      maxLines: 1, overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 10, color: Colors.white70)),
                   const SizedBox(height: 4),
                   LinearProgressIndicator(
                     value: progress,
                     backgroundColor: Colors.white10,
                     valueColor: AlwaysStoppedAnimation<Color>(
-                        over ? Colors.amber : s.themeColor),
+                      exceeded ? Colors.orangeAccent : widget.themeColor,
+                    ),
                     minHeight: 3,
                   ),
                 ],
@@ -1589,14 +901,14 @@ class _HomeScreenState extends State<HomeScreen> {
         const SizedBox(width: 8),
         Container(
           decoration: BoxDecoration(
-            color: Colors.white.fade(0.08),
+            color: Colors.white.fade(0.06),
             shape: BoxShape.circle,
             border: Border.all(color: Colors.white12),
           ),
           child: IconButton(
-            tooltip: s.isGridMode ? 'Xem dạng danh sách' : 'Xem dạng lưới',
-            icon: Icon(s.isGridMode ? Icons.grid_view : Icons.view_agenda, size: 18),
-            onPressed: () => s.change(() => s.isGridMode = !s.isGridMode),
+            tooltip: _isGridMode ? 'Xem dạng danh sách' : 'Xem dạng lưới',
+            icon: Icon(_isGridMode ? Icons.grid_view : Icons.view_agenda, size: 18),
+            onPressed: () => setState(() => _isGridMode = !_isGridMode),
           ),
         ),
       ],
@@ -1605,7 +917,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildSearchField() {
     return TextField(
-      onChanged: (val) => setState(() => _searchQuery = val),
+      onChanged: (v) => setState(() => _searchQuery = v),
       decoration: InputDecoration(
         hintText: 'Tìm kiếm bài viết...',
         prefixIcon: const Icon(Icons.search, size: 20, color: Colors.white38),
@@ -1622,50 +934,39 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildNotesView(List<Note> notes) {
     if (notes.isEmpty) {
-      final message = s.notes.isEmpty
+      final message = _notes.isEmpty
           ? 'Chưa có bài viết nào.\nNhấn nút cộng để bắt đầu viết.'
           : 'Không tìm thấy bài viết phù hợp.';
       return Center(
-        child: Text(message,
-            textAlign: TextAlign.center,
+        child: Text(message, textAlign: TextAlign.center,
             style: const TextStyle(color: Colors.white38, height: 1.5)),
       );
     }
+    const listPad = EdgeInsets.only(bottom: 88);
 
-    const listPadding = EdgeInsets.only(bottom: 88);
-
-    if (s.isGridMode) {
+    if (_isGridMode) {
       return GridView.builder(
-        padding: listPadding,
+        padding: listPad,
         gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: 260,
-          mainAxisExtent: 168,
-          crossAxisSpacing: 10,
-          mainAxisSpacing: 10,
+          maxCrossAxisExtent: 260, mainAxisExtent: 168,
+          crossAxisSpacing: 10, mainAxisSpacing: 10,
         ),
         itemCount: notes.length,
-        itemBuilder: (context, index) {
-          final note = notes[index];
-          return _buildNoteCard(note, key: ValueKey(note.id));
-        },
+        itemBuilder: (_, i) => _buildNoteCard(notes[i], key: ValueKey(notes[i].id)),
       );
     }
-
     return ListView.builder(
-      padding: listPadding,
+      padding: listPad,
       itemCount: notes.length,
-      itemBuilder: (context, index) {
-        final note = notes[index];
-        return _buildNoteCard(note, key: ValueKey(note.id));
-      },
+      itemBuilder: (_, i) => _buildNoteCard(notes[i], key: ValueKey(notes[i].id)),
     );
   }
 
   Widget _buildNoteCard(Note note, {Key? key}) {
-    final grid = s.isGridMode;
+    final plain = stripMarkdown(note.content);
     final contentText = Text(
-      note.content.isEmpty ? '(Chưa có nội dung)' : previewText(note.content),
-      maxLines: grid ? 3 : 4,
+      plain.isEmpty ? '(Chưa có nội dung)' : previewText(plain),
+      maxLines: _isGridMode ? 3 : 4,
       overflow: TextOverflow.ellipsis,
       style: const TextStyle(color: Colors.white60, fontSize: 13),
     );
@@ -1675,17 +976,17 @@ class _HomeScreenState extends State<HomeScreen> {
       onTap: () => _openEditor(note),
       onLongPress: () => _confirmDelete(note),
       child: Container(
-        margin: EdgeInsets.only(bottom: grid ? 0 : 12),
+        margin: EdgeInsets.only(bottom: _isGridMode ? 0 : 12),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: Colors.white.fade(0.05),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
-            color: note.isPinned ? s.themeColor.fade(0.5) : Colors.white10,
+            color: note.isPinned ? widget.themeColor.fade(0.5) : Colors.white10,
           ),
         ),
         child: Column(
-          mainAxisSize: grid ? MainAxisSize.max : MainAxisSize.min,
+          mainAxisSize: _isGridMode ? MainAxisSize.max : MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
@@ -1695,23 +996,21 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Text(
                     note.title.isEmpty ? 'Không có tiêu đề' : note.title,
                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
                   ),
                 ),
                 IconButton(
                   padding: const EdgeInsets.all(4),
                   constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                   tooltip: note.isPinned ? 'Bỏ ghim' : 'Ghim bài viết',
-                  icon: Icon(Icons.push_pin,
-                      size: 16,
+                  icon: Icon(Icons.push_pin, size: 16,
                       color: note.isPinned ? Colors.amber : Colors.white24),
-                  onPressed: () => s.togglePin(note.id),
+                  onPressed: () => _togglePin(note.id),
                 ),
               ],
             ),
             const SizedBox(height: 6),
-            if (grid) Expanded(child: contentText) else contentText,
+            if (_isGridMode) Expanded(child: contentText) else contentText,
             const SizedBox(height: 6),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1729,530 +1028,478 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// ================= MENU NGÔI SAO =================
-Future<void> showAppMenu(BuildContext context, AppState state) {
-  return showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    backgroundColor: Colors.transparent,
-    builder: (ctx) => DraggableScrollableSheet(
-      initialChildSize: 0.9,
-      minChildSize: 0.5,
-      maxChildSize: 0.96,
-      expand: false,
-      builder: (ctx, scroll) => _MenuSheet(state: state, scroll: scroll),
-    ),
-  );
-}
+// ================= NỀN LOANG ĐẸP HƠN =================
 
-class _MenuSheet extends StatelessWidget {
-  const _MenuSheet({required this.state, required this.scroll});
-
-  final AppState state;
-  final ScrollController scroll;
-
-  Widget _title(String text, IconData icon, Color color) => Padding(
-        padding: const EdgeInsets.only(top: 22, bottom: 10),
-        child: Row(
-          children: [
-            Icon(icon, size: 18, color: color),
-            const SizedBox(width: 8),
-            Text(text,
-                style: const TextStyle(
-                    fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white)),
-          ],
-        ),
-      );
+class _AmbientBackground extends StatelessWidget {
+  const _AmbientBackground({required this.themeColor});
+  final Color themeColor;
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: const Color(0xFF14141A),
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-      clipBehavior: Clip.antiAlias,
-      child: ListenableBuilder(
-        listenable: state,
-        builder: (context, _) {
-          final color = state.themeColor;
-          return ListView(
-            controller: scroll,
-            padding: const EdgeInsets.fromLTRB(20, 10, 20, 32),
-            children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 14),
-              const Row(
-                children: [
-                  Icon(Icons.star_rounded, color: Colors.amber),
-                  SizedBox(width: 8),
-                  Text('Menu', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                ],
-              ),
-              _title('Điểm danh chuỗi', Icons.local_fire_department_rounded, Colors.orange),
-              _StreakCard(state: state),
-              _title('Mục tiêu viết', Icons.flag_rounded, color),
-              _GoalTile(state: state),
-              _title('Giao diện', Icons.palette_rounded, color),
-              _AppearanceSection(state: state),
-              _title('Xuất file', Icons.ios_share_rounded, color),
-              ExportPanel(
-                state: state,
-                notesBuilder: () => List<Note>.from(state.notes),
-                heading: 'Xuất tất cả ${state.notes.length} bài viết',
-              ),
+    return Stack(children: [
+      // Quầng sáng chính phía trên-trái
+      Positioned(
+        top: -260, left: -180,
+        child: _Glow(color: themeColor, size: 620, intensity: 0.35),
+      ),
+      // Quầng phụ phía dưới-phải
+      Positioned(
+        bottom: -260, right: -200,
+        child: _Glow(color: themeColor, size: 560, intensity: 0.28),
+      ),
+      // Điểm nhấn nhỏ phía trên-phải
+      Positioned(
+        top: 80, right: -120,
+        child: _Glow(color: themeColor, size: 280, intensity: 0.12),
+      ),
+      // Điểm nhấn nhỏ phía dưới-trái
+      Positioned(
+        bottom: 60, left: -100,
+        child: _Glow(color: themeColor, size: 240, intensity: 0.1),
+      ),
+      // Lớp phủ tối để không bị chói
+      Container(color: Colors.black.fade(0.15)),
+    ]);
+  }
+}
+
+class _Glow extends StatelessWidget {
+  const _Glow({required this.color, required this.size, required this.intensity});
+  final Color color;
+  final double size;
+  final double intensity;
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: RadialGradient(
+            colors: [
+              color.fade(intensity),
+              color.fade(intensity * 0.5),
+              color.fade(intensity * 0.15),
+              Colors.transparent,
             ],
-          );
-        },
+            stops: const [0.0, 0.35, 0.65, 1.0],
+          ),
+        ),
       ),
     );
   }
 }
 
-class _StreakCard extends StatelessWidget {
-  const _StreakCard({required this.state});
+// ================= MENU CÀI ĐẶT (BOTTOM SHEET) =================
 
-  final AppState state;
+class _SettingsMenuSheet extends StatelessWidget {
+  const _SettingsMenuSheet({
+    required this.themeColor,
+    required this.currentThemeIndex,
+    required this.onThemeIndexChanged,
+    required this.currentGoal,
+    required this.onGoalChanged,
+    required this.streak,
+    required this.streakLoaded,
+    required this.onExport,
+  });
+
+  final Color themeColor;
+  final int currentThemeIndex;
+  final ValueChanged<int> onThemeIndexChanged;
+  final int currentGoal;
+  final ValueChanged<int> onGoalChanged;
+  final StreakService streak;
+  final bool streakLoaded;
+  final VoidCallback onExport;
 
   @override
   Widget build(BuildContext context) {
-    final color = state.themeColor;
-    final today = dateOnly(DateTime.now());
-    const labels = ['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'];
-    final days = [
-      for (var i = 6; i >= 0; i--) DateTime(today.year, today.month, today.day - i)
-    ];
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white.fade(0.05),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.local_fire_department_rounded,
-                  color: Colors.orange, size: 42),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('${state.streak} ngày liên tiếp',
-                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Kỷ lục ${state.longestStreak} ngày · Tổng ${state.checkins.length} lần điểm danh',
-                      style: const TextStyle(color: Colors.white54, fontSize: 12),
-                    ),
-                  ],
+    return DraggableScrollableSheet(
+      initialChildSize: 0.75,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (_, scrollController) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFF121218),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        child: ListView(
+          controller: scrollController,
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+          children: [
+            Center(
+              child: Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
                 ),
               ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              for (final d in days)
-                Column(
-                  children: [
-                    Text(labels[d.weekday - 1],
-                        style: const TextStyle(color: Colors.white38, fontSize: 11)),
-                    const SizedBox(height: 6),
-                    Container(
-                      width: 32,
-                      height: 32,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: state.hasCheckin(d) ? color : Colors.white.fade(0.06),
-                        border: d == today
-                            ? Border.all(color: Colors.white70, width: 1.5)
-                            : null,
-                      ),
-                      child: state.hasCheckin(d)
-                          ? const Icon(Icons.check, size: 18, color: Colors.white)
+            ),
+            const SizedBox(height: 20),
+            Row(children: [
+              Icon(Icons.star_rounded, color: themeColor, size: 28),
+              const SizedBox(width: 10),
+              const Text('Cài đặt & Công cụ',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+            ]),
+            const SizedBox(height: 24),
+
+            // --- Màu chủ đề ---
+            _SectionTitle(icon: Icons.palette_outlined, text: 'Màu chủ đề', color: themeColor),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12, runSpacing: 12,
+              children: List.generate(kThemeColors.length, (i) {
+                final c = kThemeColors[i];
+                final selected = i == currentThemeIndex;
+                return GestureDetector(
+                  onTap: () => onThemeIndexChanged(i),
+                  child: Container(
+                    width: 44, height: 44,
+                    decoration: BoxDecoration(
+                      color: c, shape: BoxShape.circle,
+                      border: selected
+                          ? Border.all(color: Colors.white, width: 3)
+                          : Border.all(color: Colors.white24),
+                      boxShadow: selected
+                          ? [BoxShadow(color: c.fade(0.6), blurRadius: 12)]
                           : null,
                     ),
-                  ],
-                ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton.icon(
-              style: FilledButton.styleFrom(
-                backgroundColor: color,
-                foregroundColor: Colors.white,
-                disabledBackgroundColor: Colors.white.fade(0.08),
-                disabledForegroundColor: Colors.white54,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-              ),
-              onPressed: state.checkedInToday ? null : state.checkInToday,
-              icon: Icon(state.checkedInToday ? Icons.check_circle : Icons.touch_app),
-              label: Text(state.checkedInToday
-                  ? 'Đã điểm danh hôm nay'
-                  : 'Điểm danh hôm nay'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _GoalTile extends StatelessWidget {
-  const _GoalTile({required this.state});
-
-  final AppState state;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = state.themeColor;
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white.fade(0.05),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Column(
-        children: [
-          ListTile(
-            title: Text('Mục tiêu hằng ngày: ${state.dailyGoal} từ'),
-            subtitle: Text('Hôm nay đã viết ${state.todayWords} từ',
-                style: const TextStyle(color: Colors.white54, fontSize: 12)),
-            trailing: const Icon(Icons.edit, size: 18, color: Colors.white54),
-            onTap: () async {
-              final r = await showDialog<_GoalResult>(
-                context: context,
-                builder: (_) => _GoalDialog(
-                  initialGoal: state.dailyGoal,
-                  initialRemind: state.restReminder,
-                  themeColor: color,
-                ),
-              );
-              if (r == null) return;
-              state.change(() {
-                state.dailyGoal = r.goal;
-                state.restReminder = r.remind;
-              });
-            },
-          ),
-          SwitchListTile(
-            activeColor: color,
-            title: const Text('Nhắc nghỉ ngơi khi viết quá mục tiêu'),
-            value: state.restReminder,
-            onChanged: (v) => state.change(() => state.restReminder = v),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _AppearanceSection extends StatelessWidget {
-  const _AppearanceSection({required this.state});
-
-  final AppState state;
-
-  Widget _label(String t) => Padding(
-        padding: const EdgeInsets.only(top: 12, bottom: 6),
-        child: Text(t, style: const TextStyle(color: Colors.white70, fontSize: 13)),
-      );
-
-  @override
-  Widget build(BuildContext context) {
-    final color = state.themeColor;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-      decoration: BoxDecoration(
-        color: Colors.white.fade(0.05),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _label('Màu chủ đề'),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              for (var i = 0; i < kThemeColors.length; i++)
-                GestureDetector(
-                  onTap: () => state.change(() => state.themeIndex = i),
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: kThemeColors[i],
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: state.themeIndex == i ? Colors.white : Colors.transparent,
-                        width: 2.5,
-                      ),
-                    ),
-                    child: state.themeIndex == i
-                        ? const Icon(Icons.check, size: 18, color: Colors.white)
+                    child: selected
+                        ? const Icon(Icons.check, color: Colors.white, size: 22)
                         : null,
                   ),
-                ),
-            ],
-          ),
-          _label('Màu nền'),
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: [
-              for (var i = 0; i < kBackgrounds.length; i++)
-                ChoiceChip(
-                  showCheckmark: false,
-                  label: Text(kBackgrounds[i].name),
-                  avatar: CircleAvatar(
-                    backgroundColor: kBackgrounds[i].color,
-                    radius: 8,
-                  ),
-                  selected: state.bgIndex == i,
-                  selectedColor: color.fade(0.35),
-                  backgroundColor: Colors.white.fade(0.06),
-                  side: const BorderSide(color: Colors.white12),
-                  onSelected: (_) => state.change(() => state.bgIndex = i),
-                ),
-            ],
-          ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            activeColor: color,
-            title: const Text('Hiệu ứng nền loang mềm'),
-            value: state.aurora,
-            onChanged: (v) => state.change(() => state.aurora = v),
-          ),
-          _label('Phông chữ khi viết'),
-          Wrap(
-            spacing: 10,
-            children: [
-              for (var i = 0; i < kFontNames.length; i++)
-                ChoiceChip(
-                  showCheckmark: false,
-                  label: Text(kFontNames[i],
-                      style: TextStyle(fontFamily: kFontFamilies[i])),
-                  selected: state.fontIndex == i,
-                  selectedColor: color.fade(0.35),
-                  backgroundColor: Colors.white.fade(0.06),
-                  side: const BorderSide(color: Colors.white12),
-                  onSelected: (_) => state.change(() => state.fontIndex = i),
-                ),
-            ],
-          ),
-          _label('Cỡ chữ: ${state.fontSize.round()}'),
-          Slider(
-            activeColor: color,
-            min: 14,
-            max: 26,
-            divisions: 12,
-            value: state.fontSize,
-            onChanged: (v) => state.change(() => state.fontSize = v),
-          ),
-          _label('Giãn dòng: ${state.lineHeight.toStringAsFixed(1)}'),
-          Slider(
-            activeColor: color,
-            min: 1.2,
-            max: 2.4,
-            divisions: 12,
-            value: state.lineHeight,
-            onChanged: (v) => state.change(() => state.lineHeight = v),
-          ),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.black.fade(0.25),
-              borderRadius: BorderRadius.circular(12),
+                );
+              }),
             ),
-            child: Text(
-              'Xem thử: Arista đứng trên đỉnh đồi nhìn xuống thung lũng sương mù.',
-              style: TextStyle(
-                fontSize: state.fontSize,
-                height: state.lineHeight,
-                fontFamily: state.fontFamily,
-                color: kWhite90,
+            const SizedBox(height: 28),
+
+            // --- Mục tiêu hàng ngày ---
+            _SectionTitle(icon: Icons.flag_outlined, text: 'Mục tiêu mỗi ngày', color: themeColor),
+            const SizedBox(height: 10),
+            InkWell(
+              onTap: () async {
+                final newGoal = await showDialog<int>(
+                  context: context,
+                  builder: (_) => _GoalDialog(initialGoal: currentGoal, themeColor: themeColor),
+                );
+                if (newGoal != null && context.mounted) {
+                  onGoalChanged(newGoal);
+                  Navigator.pop(context);
+                }
+              },
+              borderRadius: BorderRadius.circular(16),
+              child: Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Colors.white.fade(0.05),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: Row(children: [
+                  Icon(Icons.edit_outlined, size: 18, color: themeColor),
+                  const SizedBox(width: 12),
+                  Expanded(child: Text('$currentGoal từ/ngày',
+                      style: const TextStyle(color: Colors.white, fontSize: 15))),
+                  const Text('Đổi', style: TextStyle(color: Colors.white54, fontSize: 13)),
+                ]),
               ),
             ),
-          ),
-        ],
+            const SizedBox(height: 28),
+
+            // --- Điểm danh chuỗi ---
+            _SectionTitle(icon: Icons.local_fire_department_outlined,
+                text: 'Điểm danh chuỗi', color: themeColor),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [themeColor.fade(0.25), themeColor.fade(0.05)],
+                  begin: Alignment.topLeft, end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: themeColor.fade(0.4)),
+              ),
+              child: streakLoaded
+                  ? Row(children: [
+                      Icon(Icons.local_fire_department,
+                          color: Colors.orangeAccent, size: 40),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('${streak.count} ngày liên tiếp',
+                                style: const TextStyle(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white)),
+                            const SizedBox(height: 4),
+                            Text(
+                              streak.hasCheckedInToday
+                                  ? 'Hôm nay đã điểm danh ✓'
+                                  : 'Viết một bài hôm nay để giữ chuỗi!',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: streak.hasCheckedInToday
+                                    ? Colors.greenAccent
+                                    : Colors.white70,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ])
+                  : const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(8),
+                        child: SizedBox(width: 20, height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2)),
+                      ),
+                    ),
+            ),
+            const SizedBox(height: 28),
+
+            // --- Xuất file ---
+            _SectionTitle(icon: Icons.file_download_outlined,
+                text: 'Xuất file', color: themeColor),
+            const SizedBox(height: 10),
+            InkWell(
+              onTap: () {
+                Navigator.pop(context);
+                onExport();
+              },
+              borderRadius: BorderRadius.circular(16),
+              child: Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Colors.white.fade(0.05),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: Row(children: [
+                  Icon(Icons.description_outlined, size: 20, color: themeColor),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Xuất DOCX / TXT / MD / HTML',
+                            style: TextStyle(color: Colors.white, fontSize: 14,
+                                fontWeight: FontWeight.w600)),
+                        SizedBox(height: 2),
+                        Text('Chọn bài viết rồi chia sẻ / lưu về máy',
+                            style: TextStyle(color: Colors.white54, fontSize: 11)),
+                      ],
+                    ),
+                  ),
+                  const Icon(Icons.chevron_right, color: Colors.white38),
+                ]),
+              ),
+            ),
+            const SizedBox(height: 28),
+
+            // --- Info ---
+            Center(
+              child: Text(
+                'Novel App • bởi azrael',
+                style: TextStyle(color: Colors.white.fade(0.3), fontSize: 11),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-// ================= BẢNG XUẤT FILE (dùng ở menu và ở màn soạn thảo) =================
-class ExportPanel extends StatefulWidget {
-  const ExportPanel({
-    super.key,
-    required this.state,
-    required this.notesBuilder,
-    required this.heading,
-  });
-
-  final AppState state;
-  final List<Note> Function() notesBuilder;
-  final String heading;
-
-  @override
-  State<ExportPanel> createState() => _ExportPanelState();
-}
-
-class _ExportPanelState extends State<ExportPanel> {
-  String? _message;
-  bool _busy = false;
-
-  AppState get s => widget.state;
-
-  Future<void> _share() async {
-    final notes = widget.notesBuilder();
-    if (notes.isEmpty) {
-      setState(() => _message = 'Chưa có bài viết để xuất.');
-      return;
-    }
-    setState(() {
-      _busy = true;
-      _message = null;
-    });
-    try {
-      await shareExport(s, notes);
-      if (mounted) setState(() => _message = 'Đã tạo file ${s.exportFormat.label}.');
-    } catch (e) {
-      if (mounted) setState(() => _message = 'Không xuất được file: $e');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _copy() async {
-    final notes = widget.notesBuilder();
-    if (notes.isEmpty) {
-      setState(() => _message = 'Chưa có bài viết để sao chép.');
-      return;
-    }
-    final text = exportText(s.exportFormat, notes, s.exportTitle, s.exportMeta);
-    await Clipboard.setData(ClipboardData(text: text));
-    if (mounted) setState(() => _message = 'Đã sao chép dạng ${s.exportFormat.label}.');
-  }
+class _SectionTitle extends StatelessWidget {
+  const _SectionTitle({required this.icon, required this.text, required this.color});
+  final IconData icon;
+  final String text;
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: s,
-      builder: (context, _) {
-        final color = s.themeColor;
-        return Container(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-          decoration: BoxDecoration(
-            color: Colors.white.fade(0.05),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.white10),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(widget.heading,
-                  style: const TextStyle(color: Colors.white70, fontSize: 13)),
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final f in ExportFormat.values)
-                    ChoiceChip(
-                      showCheckmark: false,
-                      label: Text(f.label),
-                      selected: s.exportFormat == f,
-                      selectedColor: color.fade(0.35),
-                      backgroundColor: Colors.white.fade(0.06),
-                      side: const BorderSide(color: Colors.white12),
-                      onSelected: (_) => s.change(() => s.exportFormat = f),
-                    ),
-                ],
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                dense: true,
-                activeColor: color,
-                title: const Text('Kèm tiêu đề'),
-                value: s.exportTitle,
-                onChanged: (v) => s.change(() => s.exportTitle = v),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                dense: true,
-                activeColor: color,
-                title: const Text('Kèm ngày sửa và số từ'),
-                value: s.exportMeta,
-                onChanged: (v) => s.change(() => s.exportMeta = v),
-              ),
-              const SizedBox(height: 6),
-              Row(
-                children: [
-                  Expanded(
-                    child: FilledButton.icon(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: color,
-                        foregroundColor: Colors.white,
-                      ),
-                      onPressed: _busy ? null : _share,
-                      icon: const Icon(Icons.ios_share, size: 18),
-                      label: const Text('Chia sẻ / Lưu file'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  OutlinedButton.icon(
-                    onPressed: s.exportFormat.isText ? _copy : null,
-                    icon: const Icon(Icons.copy, size: 18),
-                    label: const Text('Sao chép'),
-                  ),
-                ],
-              ),
-              if (_message != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 10),
-                  child: Text(_message!,
-                      style: const TextStyle(color: Colors.white54, fontSize: 12)),
+    return Row(children: [
+      Icon(icon, size: 18, color: color),
+      const SizedBox(width: 8),
+      Text(text, style: const TextStyle(
+          color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700)),
+    ]);
+  }
+}
+
+// ================= SHEET XUẤT FILE =================
+
+class _ExportSheet extends StatefulWidget {
+  const _ExportSheet({required this.themeColor, required this.notes});
+  final Color themeColor;
+  final List<Note> notes;
+
+  @override
+  State<_ExportSheet> createState() => _ExportSheetState();
+}
+
+class _ExportSheetState extends State<_ExportSheet> {
+  Note? _selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xFF121218),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
                 ),
-            ],
-          ),
-        );
-      },
+              ),
+            ),
+            const SizedBox(height: 20),
+            Row(children: [
+              Icon(Icons.file_download_outlined, color: widget.themeColor, size: 24),
+              const SizedBox(width: 10),
+              const Text('Xuất file',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+            ]),
+            const SizedBox(height: 16),
+            const Text('Chọn bài viết:',
+                style: TextStyle(color: Colors.white70, fontSize: 12)),
+            const SizedBox(height: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 220),
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: widget.notes.length,
+                itemBuilder: (_, i) {
+                  final n = widget.notes[i];
+                  final sel = identical(_selected, n) || (_selected?.id == n.id);
+                  return InkWell(
+                    onTap: () => setState(() => _selected = n),
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: sel ? widget.themeColor.fade(0.15) : Colors.white.fade(0.04),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: sel ? widget.themeColor.fade(0.6) : Colors.white12,
+                        ),
+                      ),
+                      child: Row(children: [
+                        Icon(
+                          sel ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+                          size: 18,
+                          color: sel ? widget.themeColor : Colors.white38,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            n.title.isEmpty ? '(Không tiêu đề)' : n.title,
+                            style: const TextStyle(color: Colors.white, fontSize: 13),
+                            maxLines: 1, overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ]),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text('Chọn định dạng:',
+                style: TextStyle(color: Colors.white70, fontSize: 12)),
+            const SizedBox(height: 8),
+            ...ExportFormat.values.map((f) {
+              final enabled = _selected != null;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: InkWell(
+                  onTap: enabled
+                      ? () async {
+                          final note = _selected!;
+                          Navigator.pop(context);
+                          final title = note.title.isEmpty ? 'Bài viết' : note.title;
+                          await exportAndShare(context, f, title, note.content);
+                        }
+                      : null,
+                  borderRadius: BorderRadius.circular(14),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: enabled
+                          ? Colors.white.fade(0.06)
+                          : Colors.white.fade(0.02),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: enabled ? Colors.white24 : Colors.white10,
+                      ),
+                    ),
+                    child: Row(children: [
+                      Icon(
+                        switch (f) {
+                          ExportFormat.docx => Icons.description,
+                          ExportFormat.txt => Icons.text_snippet_outlined,
+                          ExportFormat.markdown => Icons.code,
+                          ExportFormat.html => Icons.web_outlined,
+                        },
+                        color: enabled ? widget.themeColor : Colors.white24,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          f.label,
+                          style: TextStyle(
+                            color: enabled ? Colors.white : Colors.white24,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                      if (enabled)
+                        const Icon(Icons.chevron_right, color: Colors.white38),
+                    ]),
+                  ),
+                ),
+              );
+            }),
+            const SizedBox(height: 4),
+            Text(
+              _selected == null ? 'Chọn một bài viết để tiếp tục.' : 'File sẽ được tạo và mở bảng chia sẻ.',
+              style: const TextStyle(color: Colors.white38, fontSize: 11),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
 
-// ================= HỘP THOẠI ĐẶT MỤC TIÊU =================
-class _GoalResult {
-  const _GoalResult(this.goal, this.remind);
-  final int goal;
-  final bool remind;
-}
+// ================= HỘP THOẠI MỤC TIÊU =================
 
 class _GoalDialog extends StatefulWidget {
-  const _GoalDialog({
-    required this.initialGoal,
-    required this.initialRemind,
-    required this.themeColor,
-  });
-
+  const _GoalDialog({required this.initialGoal, required this.themeColor});
   final int initialGoal;
-  final bool initialRemind;
   final Color themeColor;
 
   @override
@@ -2262,7 +1509,6 @@ class _GoalDialog extends StatefulWidget {
 class _GoalDialogState extends State<_GoalDialog> {
   late final TextEditingController _controller =
       TextEditingController(text: widget.initialGoal.toString());
-  late bool _remind = widget.initialRemind;
   String? _error;
 
   @override
@@ -2272,12 +1518,12 @@ class _GoalDialogState extends State<_GoalDialog> {
   }
 
   void _submit() {
-    final value = int.tryParse(_controller.text.trim());
-    if (value == null || value <= 0) {
+    final v = int.tryParse(_controller.text.trim());
+    if (v == null || v <= 0) {
       setState(() => _error = 'Nhập số từ lớn hơn 0');
       return;
     }
-    Navigator.of(context).pop(_GoalResult(value, _remind));
+    Navigator.of(context).pop(v);
   }
 
   @override
@@ -2287,44 +1533,29 @@ class _GoalDialogState extends State<_GoalDialog> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
       title: const Text('Mục tiêu viết hàng ngày',
           style: TextStyle(color: Colors.white, fontSize: 16)),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: _controller,
-            autofocus: true,
-            keyboardType: TextInputType.number,
-            inputFormatters: [
-              FilteringTextInputFormatter.digitsOnly,
-              LengthLimitingTextInputFormatter(6),
-            ],
-            onChanged: (_) {
-              if (_error != null) setState(() => _error = null);
-            },
-            onSubmitted: (_) => _submit(),
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-            decoration: InputDecoration(
-              filled: true,
-              fillColor: Colors.white.fade(0.08),
-              errorText: _error,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: BorderSide.none,
-              ),
-              suffixText: 'từ',
-            ),
-          ),
-          const SizedBox(height: 8),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            dense: true,
-            activeColor: widget.themeColor,
-            title: const Text('Nhắc nghỉ ngơi khi viết quá mục tiêu',
-                style: TextStyle(fontSize: 13)),
-            value: _remind,
-            onChanged: (v) => setState(() => _remind = v),
-          ),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        keyboardType: TextInputType.number,
+        inputFormatters: [
+          FilteringTextInputFormatter.digitsOnly,
+          LengthLimitingTextInputFormatter(6),
         ],
+        onChanged: (_) {
+          if (_error != null) setState(() => _error = null);
+        },
+        onSubmitted: (_) => _submit(),
+        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        decoration: InputDecoration(
+          filled: true,
+          fillColor: Colors.white.fade(0.08),
+          errorText: _error,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide.none,
+          ),
+          suffixText: 'từ',
+        ),
       ),
       actions: [
         TextButton(
@@ -2340,12 +1571,12 @@ class _GoalDialogState extends State<_GoalDialog> {
   }
 }
 
-// ================= MÀN HÌNH SOẠN THẢO VĂN BẢN (EDITOR) =================
-class EditorScreen extends StatefulWidget {
-  const EditorScreen({super.key, this.note, required this.state});
+// ================= EDITOR =================
 
+class EditorScreen extends StatefulWidget {
+  const EditorScreen({super.key, this.note, required this.themeColor});
   final Note? note;
-  final AppState state;
+  final Color themeColor;
 
   @override
   State<EditorScreen> createState() => _EditorScreenState();
@@ -2353,164 +1584,209 @@ class EditorScreen extends StatefulWidget {
 
 class _EditorScreenState extends State<EditorScreen> {
   late final TextEditingController _titleController;
-  late final RichTextController _content;
-  final FocusNode _contentFocus = FocusNode();
-
+  late final TextEditingController _contentController;
+  late final FocusNode _contentFocus;
   int _wordCount = 0;
   String _lastCountedText = '';
-  late final int _baseToday;
-  bool _restDialogOpen = false;
+  bool _previewMode = false;
 
-  AppState get s => widget.state;
+  // Undo stack — tự quản lý vì TextField không có sẵn undo gọn.
+  final List<TextEditingValue> _undoStack = [];
+  Timer? _undoDebounce;
 
   @override
   void initState() {
     super.initState();
-    final note = widget.note;
-    _titleController = TextEditingController(text: note?.title ?? '');
-    final text = note?.content ?? '';
-    _content = RichTextController(
-      text: text,
-      styles: decodeStyles(note?.styles ?? '', text.length),
-    );
-    _lastCountedText = _content.text;
-    _wordCount = countWords(_lastCountedText);
-    // Số từ hôm nay không tính phần của chính bài này (để cộng số từ đang gõ).
-    _baseToday = math.max(0, s.todayWords - (note?.words ?? 0));
-    _content.addListener(_onContentChanged);
+    _titleController = TextEditingController(text: widget.note?.title ?? '');
+    _contentController = TextEditingController(text: widget.note?.content ?? '');
+    _contentFocus = FocusNode();
+    _lastCountedText = _contentController.text;
+    _wordCount = countWords(stripMarkdown(_lastCountedText));
+    _contentController.addListener(_onContentChanged);
   }
 
   void _onContentChanged() {
-    final text = _content.text;
+    final text = _contentController.text;
     if (text == _lastCountedText) return;
     _lastCountedText = text;
-    final count = countWords(text);
+
+    // Cập nhật số từ luôn (kể cả khi đang composition)
+    final count = countWords(stripMarkdown(text));
     if (count != _wordCount) {
       setState(() => _wordCount = count);
-      _checkRest();
     }
-  }
 
-  int get _liveToday => _baseToday + _wordCount;
-
-  void _checkRest() {
-    if (!s.restReminder || s.restShownToday || _restDialogOpen) return;
-    if (_liveToday <= s.dailyGoal) return;
-    s.markRestShown();
-    _restDialogOpen = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _showRestDialog();
+    // Undo debounce: nhóm các lần gõ nhanh vào 1 mốc undo
+    _undoDebounce?.cancel();
+    _undoDebounce = Timer(const Duration(milliseconds: 800), () {
+      if (_undoStack.isEmpty || _undoStack.last.text != _contentController.text) {
+        _pushUndo();
+      }
     });
   }
 
-  Future<void> _showRestDialog() async {
-    final color = s.themeColor;
-    final rest = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF16161C),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        icon: Icon(Icons.self_improvement, color: color, size: 40),
-        title: const Text('Nghỉ ngơi một chút nhé',
-            style: TextStyle(color: Colors.white, fontSize: 18)),
-        content: Text(
-          'Hôm nay bạn đã viết $_liveToday từ, vượt mục tiêu ${s.dailyGoal} từ. '
-          'Hãy đứng dậy vươn vai, uống nước và cho mắt nghỉ 5-10 phút. '
-          'Bài viết của bạn vẫn ở đây chờ bạn.',
-          textAlign: TextAlign.center,
-          style: const TextStyle(color: Colors.white70, height: 1.5),
-        ),
-        actionsAlignment: MainAxisAlignment.center,
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Viết tiếp', style: TextStyle(color: Colors.white54)),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: color),
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Lưu và nghỉ ngơi'),
-          ),
-        ],
-      ),
-    );
-    _restDialogOpen = false;
-    if (rest == true && mounted) _saveAndExit();
+  void _pushUndo() {
+    _undoStack.add(_contentController.value);
+    if (_undoStack.length > 100) _undoStack.removeAt(0);
   }
 
-  /// Tạo bài viết từ nội dung đang soạn (đã cắt khoảng trắng đầu/cuối,
-  /// định dạng được cắt theo đúng đoạn chữ).
-  Note _buildNote({required String id, required bool pinned}) {
-    final raw = _content.text;
-    final trimmed = raw.trim();
-    final lead = raw.length - raw.trimLeft().length;
-    final styles = trimmed.isEmpty
-        ? ''
-        : _content.encodedStylesRange(lead, lead + trimmed.length);
-    final title = _titleController.text.trim();
-    return Note(
-      id: id,
-      title: title.isEmpty ? 'Bài viết mới' : title,
-      content: trimmed,
-      styles: styles,
-      isPinned: pinned,
-      words: countWords(trimmed),
-      updatedAt: DateTime.now(),
+  void _undo() {
+    if (_undoStack.isEmpty) return;
+    final prev = _undoStack.removeLast();
+    _contentController.value = prev;
+    setState(() {});
+  }
+
+  /// Chèn markdown bao quanh vùng chọn.
+  void _applyWrap(String before, String after) {
+    _pushUndo();
+    final sel = _contentController.selection;
+    final text = _contentController.text;
+
+    if (!sel.isValid) {
+      // Không có selection, chèn cặp dấu và đặt con trỏ ở giữa
+      final insert = before + after;
+      final newPos = _contentController.selection.baseOffset;
+      if (newPos < 0) return;
+      final newText = text.substring(0, newPos) + insert + text.substring(newPos);
+      _contentController.value = TextEditingValue(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newPos + before.length),
+      );
+      return;
+    }
+
+    final selected = text.substring(sel.start, sel.end);
+    final newText = text.substring(0, sel.start) +
+        before + selected + after +
+        text.substring(sel.end);
+    _contentController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection(
+        baseOffset: sel.start + before.length,
+        extentOffset: sel.end + before.length,
+      ),
     );
+  }
+
+  /// Thêm/toggle prefix ở đầu dòng hiện tại (cho H1, H2).
+  void _applyLinePrefix(String prefix) {
+    _pushUndo();
+    final text = _contentController.text;
+    final sel = _contentController.selection;
+    final cursor = sel.isValid ? sel.baseOffset : text.length;
+    final lineStart = text.lastIndexOf('\n', cursor > 0 ? cursor - 1 : 0) + 1;
+
+    // Kiểm tra dòng đã có prefix chưa
+    final existing = text.substring(lineStart);
+    if (existing.startsWith(prefix)) {
+      // Toggle: bỏ prefix
+      final newText = text.substring(0, lineStart) +
+          text.substring(lineStart + prefix.length);
+      _contentController.value = TextEditingValue(
+        text: newText,
+        selection: TextSelection.collapsed(
+          offset: (cursor - prefix.length).clamp(0, newText.length),
+        ),
+      );
+    } else {
+      // Chèn prefix
+      final newText = text.substring(0, lineStart) + prefix + text.substring(lineStart);
+      _contentController.value = TextEditingValue(
+        text: newText,
+        selection: TextSelection.collapsed(offset: cursor + prefix.length),
+      );
+    }
   }
 
   void _saveAndExit() {
-    final original = widget.note;
     final title = _titleController.text.trim();
-    final content = _content.text.trim();
+    final content = _contentController.text.trim();
+    final original = widget.note;
 
     if (title.isEmpty && content.isEmpty) {
       Navigator.of(context).pop();
       return;
     }
 
-    final saved = _buildNote(
-      id: original?.id ?? DateTime.now().microsecondsSinceEpoch.toString(),
-      pinned: original?.isPinned ?? false,
-    );
-
+    final finalTitle = title.isEmpty ? 'Bài viết mới' : title;
     if (original != null &&
-        original.title == saved.title &&
-        original.content == saved.content &&
-        original.styles == saved.styles) {
+        original.title == finalTitle &&
+        original.content == content) {
       Navigator.of(context).pop();
       return;
     }
+
+    final now = DateTime.now();
+    final saved = Note(
+      id: original?.id ?? now.microsecondsSinceEpoch.toString(),
+      title: finalTitle,
+      content: content,
+      isPinned: original?.isPinned ?? false,
+      words: countWords(stripMarkdown(content)),
+      updatedAt: now,
+    );
     Navigator.of(context).pop(saved);
   }
 
-  void _openExport() {
-    final note = _buildNote(id: widget.note?.id ?? 'draft', pinned: false);
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: const Color(0xFF14141A),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-      ),
-      builder: (ctx) => Padding(
-        padding: EdgeInsets.fromLTRB(
-            20, 20, 20, 20 + MediaQuery.of(ctx).viewInsets.bottom),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Xuất bài viết này',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 12),
-              ExportPanel(
-                state: s,
-                notesBuilder: () => [note],
-                heading: '"${note.title}" · ${note.words} từ',
+  @override
+  void dispose() {
+    _undoDebounce?.cancel();
+    _contentController.removeListener(_onContentChanged);
+    _titleController.dispose();
+    _contentController.dispose();
+    _contentFocus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasSelection = _contentController.selection.isValid &&
+        !_contentController.selection.isCollapsed;
+
+    return PopScope(
+      canPop: false,
+      onPopInvoked: (didPop) {
+        if (!didPop) _saveAndExit();
+      },
+      child: Scaffold(
+        backgroundColor: kBg,
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          surfaceTintColor: Colors.transparent,
+          scrolledUnderElevation: 0,
+          elevation: 0,
+          leading: IconButton(
+            tooltip: 'Lưu và quay lại',
+            icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white),
+            onPressed: _saveAndExit,
+          ),
+          title: Text(
+            _previewMode ? 'Xem trước' : 'Soạn thảo',
+            style: const TextStyle(fontSize: 15, color: Colors.white70),
+          ),
+          actions: [
+            IconButton(
+              tooltip: _previewMode ? 'Chỉnh sửa' : 'Xem trước',
+              icon: Icon(
+                _previewMode ? Icons.edit_outlined : Icons.visibility_outlined,
+                color: Colors.white70,
               ),
+              onPressed: () => setState(() => _previewMode = !_previewMode),
+            ),
+            IconButton(
+              tooltip: 'Lưu',
+              icon: Icon(Icons.check, color: widget.themeColor, size: 28),
+              onPressed: _saveAndExit,
+            ),
+            const SizedBox(width: 8),
+          ],
+        ),
+        body: SafeArea(
+          child: Column(
+            children: [
+              Expanded(child: _previewMode ? _buildPreview() : _buildEditor()),
+              if (!_previewMode) _buildToolbar(hasSelection),
             ],
           ),
         ),
@@ -2518,131 +1794,60 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  @override
-  void dispose() {
-    _content.removeListener(_onContentChanged);
-    _titleController.dispose();
-    _content.dispose();
-    _contentFocus.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final color = s.themeColor;
-    final over = s.restReminder && _liveToday > s.dailyGoal;
-    final readMinutes = (_wordCount / 200).ceil();
-
-    return PopScope(
-      canPop: false,
-      onPopInvoked: (didPop) {
-        if (!didPop) _saveAndExit();
-      },
-      child: Stack(
+  Widget _buildEditor() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Column(
         children: [
-          AuroraBackground(
-            color: color,
-            base: s.bgColor,
-            enabled: s.aurora,
-            intensity: 0.7,
-          ),
-          Scaffold(
-            backgroundColor: Colors.transparent,
-            appBar: AppBar(
-              backgroundColor: Colors.transparent,
-              surfaceTintColor: Colors.transparent,
-              scrolledUnderElevation: 0,
-              elevation: 0,
-              leading: IconButton(
-                tooltip: 'Lưu và quay lại',
-                icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white),
-                onPressed: _saveAndExit,
-              ),
-              actions: [
-                IconButton(
-                  tooltip: 'Xuất file',
-                  icon: const Icon(Icons.ios_share, color: Colors.white70),
-                  onPressed: _openExport,
-                ),
-                IconButton(
-                  tooltip: 'Lưu',
-                  icon: Icon(Icons.check, color: color, size: 28),
-                  onPressed: _saveAndExit,
-                ),
-                const SizedBox(width: 8),
-              ],
+          TextField(
+            controller: _titleController,
+            autofocus: widget.note == null,
+            textCapitalization: TextCapitalization.sentences,
+            style: const TextStyle(
+              fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white,
             ),
-            body: SafeArea(
-              child: Column(
-                children: [
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 20.0),
-                      child: Column(
-                        children: [
-                          TextField(
-                            controller: _titleController,
-                            autofocus: widget.note == null,
-                            textCapitalization: TextCapitalization.sentences,
-                            style: const TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white),
-                            decoration: const InputDecoration(
-                              hintText: 'Tiêu đề chương / bài viết...',
-                              hintStyle: TextStyle(color: Colors.white30),
-                              border: InputBorder.none,
-                            ),
-                          ),
-                          SingleChildScrollView(
-                            scrollDirection: Axis.horizontal,
-                            child: Row(
-                              children: [
-                                _chip('$_wordCount từ', color, bold: true),
-                                const SizedBox(width: 8),
-                                _chip('${_content.text.length} ký tự', Colors.white54),
-                                if (_wordCount > 0) ...[
-                                  const SizedBox(width: 8),
-                                  _chip('~$readMinutes phút đọc', Colors.white54),
-                                ],
-                                if (over) ...[
-                                  const SizedBox(width: 8),
-                                  _chip('Vượt mục tiêu · nghỉ chút nhé', Colors.amber,
-                                      bold: true),
-                                ],
-                              ],
-                            ),
-                          ),
-                          const Divider(color: Colors.white10, height: 24),
-                          Expanded(
-                            child: TextField(
-                              controller: _content,
-                              focusNode: _contentFocus,
-                              maxLines: null,
-                              expands: true,
-                              keyboardType: TextInputType.multiline,
-                              cursorColor: color,
-                              textAlignVertical: TextAlignVertical.top,
-                              textCapitalization: TextCapitalization.sentences,
-                              style: TextStyle(
-                                fontSize: s.fontSize,
-                                color: kWhite90,
-                                height: s.lineHeight,
-                                fontFamily: s.fontFamily,
-                              ),
-                              decoration: const InputDecoration(
-                                hintText: 'Bắt đầu đặt bút thả hồn vào câu chuyện...',
-                                hintStyle: TextStyle(color: Colors.white24),
-                                border: InputBorder.none,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  _buildToolbar(color),
-                ],
+            decoration: const InputDecoration(
+              hintText: 'Tiêu đề chương / bài viết...',
+              hintStyle: TextStyle(color: Colors.white30),
+              border: InputBorder.none,
+            ),
+          ),
+          Row(children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: widget.themeColor.fade(0.2),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                '$_wordCount từ',
+                style: TextStyle(
+                  color: widget.themeColor, fontSize: 12, fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            if (_wordCount > 0) ...[
+              const SizedBox(width: 8),
+              Text(
+                '~${(_wordCount / 200).ceil()} phút đọc',
+                style: const TextStyle(color: Colors.white38, fontSize: 11),
+              ),
+            ],
+          ]),
+          const Divider(color: Colors.white10, height: 24),
+          Expanded(
+            child: TextField(
+              controller: _contentController,
+              focusNode: _contentFocus,
+              maxLines: null,
+              expands: true,
+              textAlignVertical: TextAlignVertical.top,
+              textCapitalization: TextCapitalization.sentences,
+              style: const TextStyle(fontSize: 16, color: kWhite90, height: 1.6),
+              decoration: const InputDecoration(
+                hintText: 'Bắt đầu đặt bút thả hồn vào câu chuyện...\n\nDùng thanh công cụ bên dưới để định dạng.',
+                hintStyle: TextStyle(color: Colors.white24),
+                border: InputBorder.none,
               ),
             ),
           ),
@@ -2651,186 +1856,198 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  Widget _chip(String text, Color color, {bool bold = false}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.fade(0.18),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          color: color,
-          fontSize: 12,
-          fontWeight: bold ? FontWeight.bold : FontWeight.normal,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildToolbar(Color color) {
-    return TextFieldTapRegion(
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-        decoration: BoxDecoration(
-          color: const Color(0xFF1B1B22),
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: Colors.white10),
-        ),
-        child: ListenableBuilder(
-          listenable: _content,
-          builder: (context, _) {
-            final block = _content.activeBlock;
-            return SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  _ToolBtn(
-                    icon: Icons.undo,
-                    tooltip: 'Hoàn tác',
-                    color: color,
-                    enabled: _content.canUndo,
-                    onTap: _content.undo,
-                  ),
-                  _ToolBtn(
-                    icon: Icons.redo,
-                    tooltip: 'Làm lại',
-                    color: color,
-                    enabled: _content.canRedo,
-                    onTap: _content.redo,
-                  ),
-                  const _ToolDivider(),
-                  _ToolBtn(
-                    icon: Icons.format_bold,
-                    tooltip: 'In đậm',
-                    color: color,
-                    active: _content.isInlineActive(kBold),
-                    onTap: () => _content.toggleInline(kBold),
-                  ),
-                  _ToolBtn(
-                    icon: Icons.format_italic,
-                    tooltip: 'In nghiêng',
-                    color: color,
-                    active: _content.isInlineActive(kItalic),
-                    onTap: () => _content.toggleInline(kItalic),
-                  ),
-                  _ToolBtn(
-                    icon: Icons.format_underlined,
-                    tooltip: 'Gạch chân',
-                    color: color,
-                    active: _content.isInlineActive(kUnderline),
-                    onTap: () => _content.toggleInline(kUnderline),
-                  ),
-                  _ToolBtn(
-                    icon: Icons.format_strikethrough,
-                    tooltip: 'Gạch ngang',
-                    color: color,
-                    active: _content.isInlineActive(kStrike),
-                    onTap: () => _content.toggleInline(kStrike),
-                  ),
-                  const _ToolDivider(),
-                  _ToolBtn(
-                    label: 'H1',
-                    tooltip: 'Tiêu đề lớn',
-                    color: color,
-                    active: block == 1,
-                    onTap: () => _content.setBlock(1),
-                  ),
-                  _ToolBtn(
-                    label: 'H2',
-                    tooltip: 'Tiêu đề vừa',
-                    color: color,
-                    active: block == 2,
-                    onTap: () => _content.setBlock(2),
-                  ),
-                  _ToolBtn(
-                    label: 'H3',
-                    tooltip: 'Tiêu đề nhỏ',
-                    color: color,
-                    active: block == 3,
-                    onTap: () => _content.setBlock(3),
-                  ),
-                  const _ToolDivider(),
-                  _ToolBtn(
-                    icon: Icons.format_list_bulleted,
-                    tooltip: 'Gạch đầu dòng',
-                    color: color,
-                    onTap: _content.toggleBullet,
-                  ),
-                  _ToolBtn(
-                    icon: Icons.format_clear,
-                    tooltip: 'Xóa định dạng',
-                    color: color,
-                    onTap: _content.clearFormatting,
-                  ),
-                ],
+  Widget _buildPreview() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            _titleController.text.isEmpty ? '(Chưa có tiêu đề)' : _titleController.text,
+            style: const TextStyle(
+              fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: widget.themeColor.fade(0.2),
+                borderRadius: BorderRadius.circular(12),
               ),
-            );
-          },
+              child: Text(
+                '$_wordCount từ',
+                style: TextStyle(
+                  color: widget.themeColor, fontSize: 12, fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ]),
+          const Divider(color: Colors.white10, height: 28),
+          renderMarkdown(_contentController.text, widget.themeColor),
+          const SizedBox(height: 40),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildToolbar(bool hasSelection) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF121218),
+        border: Border(top: BorderSide(color: Colors.white.fade(0.08))),
+      ),
+      child: SafeArea(
+        top: false,
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(children: [
+            _ToolbarBtn(
+              icon: Icons.undo,
+              tooltip: 'Hoàn tác',
+              themeColor: widget.themeColor,
+              enabled: _undoStack.isNotEmpty,
+              onTap: _undo,
+            ),
+            _Divider(),
+            _ToolbarTextBtn(
+              label: 'B', bold: true,
+              tooltip: 'In đậm',
+              themeColor: widget.themeColor,
+              onTap: () => _applyWrap('**', '**'),
+            ),
+            _ToolbarTextBtn(
+              label: 'I', italic: true,
+              tooltip: 'In nghiêng',
+              themeColor: widget.themeColor,
+              onTap: () => _applyWrap('*', '*'),
+            ),
+            _ToolbarTextBtn(
+              label: 'U', underline: true,
+              tooltip: 'Gạch chân',
+              themeColor: widget.themeColor,
+              onTap: () => _applyWrap('__', '__'),
+            ),
+            _Divider(),
+            _ToolbarTextBtn(
+              label: 'H1',
+              tooltip: 'Tiêu đề lớn',
+              themeColor: widget.themeColor,
+              onTap: () => _applyLinePrefix('# '),
+            ),
+            _ToolbarTextBtn(
+              label: 'H2',
+              tooltip: 'Tiêu đề vừa',
+              themeColor: widget.themeColor,
+              onTap: () => _applyLinePrefix('## '),
+            ),
+            _ToolbarTextBtn(
+              label: 'H3',
+              tooltip: 'Tiêu đề nhỏ',
+              themeColor: widget.themeColor,
+              onTap: () => _applyLinePrefix('### '),
+            ),
+            _Divider(),
+            _ToolbarBtn(
+              icon: Icons.short_text,
+              tooltip: 'Chèn dòng trống',
+              themeColor: widget.themeColor,
+              onTap: () => _applyWrap('\n\n', ''),
+            ),
+          ]),
         ),
       ),
     );
   }
 }
 
-class _ToolDivider extends StatelessWidget {
-  const _ToolDivider();
-
-  @override
-  Widget build(BuildContext context) => Container(
-        width: 1,
-        height: 22,
-        margin: const EdgeInsets.symmetric(horizontal: 4),
-        color: Colors.white12,
-      );
-}
-
-class _ToolBtn extends StatelessWidget {
-  const _ToolBtn({
-    this.icon,
-    this.label,
+class _ToolbarBtn extends StatelessWidget {
+  const _ToolbarBtn({
+    required this.icon,
     required this.tooltip,
-    required this.color,
+    required this.themeColor,
     required this.onTap,
-    this.active = false,
     this.enabled = true,
   });
-
-  final IconData? icon;
-  final String? label;
+  final IconData icon;
   final String tooltip;
-  final Color color;
+  final Color themeColor;
   final VoidCallback onTap;
-  final bool active;
   final bool enabled;
 
   @override
   Widget build(BuildContext context) {
-    final fg = !enabled ? Colors.white24 : (active ? color : Colors.white70);
     return Tooltip(
       message: tooltip,
       child: InkWell(
-        canRequestFocus: false,
-        borderRadius: BorderRadius.circular(12),
         onTap: enabled ? onTap : null,
+        borderRadius: BorderRadius.circular(10),
         child: Container(
-          width: 42,
-          height: 40,
-          margin: const EdgeInsets.symmetric(horizontal: 1),
-          decoration: BoxDecoration(
-            color: active ? color.fade(0.22) : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-          ),
+          width: 40, height: 40,
           alignment: Alignment.center,
-          child: icon != null
-              ? Icon(icon, size: 21, color: fg)
-              : Text(label ?? '',
-                  style: TextStyle(
-                      color: fg, fontWeight: FontWeight.w800, fontSize: 15)),
+          decoration: BoxDecoration(borderRadius: BorderRadius.circular(10)),
+          child: Icon(icon,
+              size: 20, color: enabled ? Colors.white70 : Colors.white24),
         ),
       ),
+    );
+  }
+}
+
+class _ToolbarTextBtn extends StatelessWidget {
+  const _ToolbarTextBtn({
+    required this.label,
+    required this.tooltip,
+    required this.themeColor,
+    required this.onTap,
+    this.bold = false,
+    this.italic = false,
+    this.underline = false,
+  });
+  final String label;
+  final String tooltip;
+  final Color themeColor;
+  final VoidCallback onTap;
+  final bool bold;
+  final bool italic;
+  final bool underline;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          width: 40, height: 40,
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: bold ? FontWeight.bold : FontWeight.w600,
+              fontStyle: italic ? FontStyle.italic : FontStyle.normal,
+              decoration: underline ? TextDecoration.underline : null,
+              decorationColor: Colors.white,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Divider extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 1, height: 24,
+      margin: const EdgeInsets.symmetric(horizontal: 6),
+      color: Colors.white12,
     );
   }
 }
