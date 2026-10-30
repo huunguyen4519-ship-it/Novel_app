@@ -29,6 +29,9 @@ const Color kWhite90 = Color(0xE6FFFFFF);
 /// Số ngày giữ bài trong thùng rác trước khi xóa vĩnh viễn.
 const int kTrashDays = 30;
 
+/// Chỉ tiêu mặc định (số từ) cho mỗi thẻ.
+const int kDefaultGoal = 500;
+
 extension ColorFade on Color {
   /// Trả về màu này với độ đục [opacity] (0.0 - 1.0).
   Color fade(double opacity) =>
@@ -86,6 +89,7 @@ String formatDate(DateTime date) {
 DateTime dateOnly(DateTime date) => DateTime(date.year, date.month, date.day);
 
 // ================= MODEL BÀI VIẾT =================
+
 class Note {
   Note({
     required this.id,
@@ -95,6 +99,7 @@ class Note {
     required this.updatedAt,
     this.deletedAt,
     this.restored = false,
+    this.goalTarget = kDefaultGoal,
   }) : words = countWords(content);
 
   final String id;
@@ -112,6 +117,9 @@ class Note {
   /// Số từ, luôn tính từ nội dung bằng [countWords].
   final int words;
 
+  /// Chỉ tiêu số từ riêng của thẻ này (dùng khi thẻ là thẻ mục tiêu).
+  final int goalTarget;
+
   Note copyWith({
     String? title,
     String? content,
@@ -120,6 +128,7 @@ class Note {
     DateTime? deletedAt,
     bool clearDeleted = false,
     bool? restored,
+    int? goalTarget,
   }) {
     return Note(
       id: id,
@@ -129,6 +138,7 @@ class Note {
       updatedAt: updatedAt ?? this.updatedAt,
       deletedAt: clearDeleted ? null : (deletedAt ?? this.deletedAt),
       restored: restored ?? this.restored,
+      goalTarget: goalTarget ?? this.goalTarget,
     );
   }
 
@@ -140,6 +150,7 @@ class Note {
         'updatedAt': updatedAt.toIso8601String(),
         'deletedAt': deletedAt?.toIso8601String(),
         'restored': restored,
+        'goalTarget': goalTarget,
       };
 
   factory Note.fromJson(Map<String, dynamic> json) {
@@ -155,6 +166,7 @@ class Note {
           ? null
           : DateTime.tryParse(json['deletedAt'] as String),
       restored: (json['restored'] as bool?) ?? false,
+      goalTarget: (json['goalTarget'] as int?) ?? kDefaultGoal,
     );
   }
 }
@@ -183,6 +195,7 @@ List<Note> _sampleNotes() {
       'giao diện, xuất file, mở thùng rác và xem chuỗi ngày viết liên tục.';
   const chapter =
       'Arista Valerius đứng trên đỉnh ngọn đồi nhìn xuống thung lũng sương mù...';
+
   return [
     Note(
       id: '1',
@@ -211,6 +224,7 @@ String _encodeNotes(List<Note> notes) =>
     jsonEncode(notes.map((n) => n.toJson()).toList());
 
 // ================= GỐC ỨNG DỤNG =================
+
 class NovelApp extends StatefulWidget {
   const NovelApp({super.key});
 
@@ -268,6 +282,7 @@ class _NovelAppState extends State<NovelApp> {
 }
 
 // ================= MÀN HÌNH CHÍNH =================
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
     super.key,
@@ -286,9 +301,8 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isGridMode = true;
   String _searchQuery = '';
 
-  // Thẻ mục tiêu: mỗi lúc chỉ có 1 thẻ, thanh chỉ tiêu phía trên đếm theo thẻ này.
+  // Thẻ mục tiêu: mỗi lúc chỉ có 1 thẻ. Chỉ tiêu được lưu ngay trên từng thẻ.
   String? _goalNoteId;
-  int _goalTarget = 500;
 
   // Điểm danh chuỗi: số ngày liên tiếp có viết thêm nội dung.
   int _streakDays = 0;
@@ -312,18 +326,34 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
       _prefs = prefs;
+
       final rawNotes = prefs.getString('notes');
       notes = rawNotes == null ? _sampleNotes() : _decodeNotes(rawNotes);
+
       final rawTrash = prefs.getString('trash');
       if (rawTrash != null) trash = _decodeNotes(rawTrash);
+
       _goalNoteId = prefs.getString('goalNoteId');
-      _goalTarget = prefs.getInt('goalTarget') ?? 500;
+      
+      // Chuyển chỉ tiêu cũ (một con số dùng chung) sang thẻ mục tiêu, chỉ làm một lần.
+      final legacyTarget = prefs.getInt('goalTarget');
+      if (legacyTarget != null &&
+          !(prefs.getBool('goalTargetMigrated') ?? false)) {
+        for (var i = 0; i < notes.length; i++) {
+          if (notes[i].id == _goalNoteId) {
+            notes[i] = notes[i].copyWith(goalTarget: legacyTarget);
+          }
+        }
+        await prefs.setBool('goalTargetMigrated', true);
+      }
+
       _streakDays = prefs.getInt('streakDays') ?? 0;
       final last = prefs.getString('lastStreak');
       _lastStreakDate = last == null ? null : DateTime.tryParse(last);
     } catch (_) {
       if (notes.isEmpty) notes = _sampleNotes();
     }
+
     if (!mounted) return;
     setState(() {
       _notes
@@ -344,13 +374,14 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       await prefs.setString('notes', _encodeNotes(_notes));
       await prefs.setString('trash', _encodeNotes(_trash));
+
       final goalId = _goalNoteId;
       if (goalId == null) {
         await prefs.remove('goalNoteId');
       } else {
         await prefs.setString('goalNoteId', goalId);
       }
-      await prefs.setInt('goalTarget', _goalTarget);
+
       await prefs.setInt('streakDays', _streakDays);
       final last = _lastStreakDate;
       if (last == null) {
@@ -377,12 +408,6 @@ class _HomeScreenState extends State<HomeScreen> {
     return null;
   }
 
-  /// Đang có thẻ mục tiêu và thẻ đó chưa đạt chỉ tiêu.
-  bool get _goalLocked {
-    final goal = _goalNote;
-    return goal != null && goal.words < _goalTarget;
-  }
-
   void _setGoal(Note note) {
     setState(() {
       _goalNoteId = note.id;
@@ -390,6 +415,16 @@ class _HomeScreenState extends State<HomeScreen> {
     _persist();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Đã đặt "${_titleOf(note)}" làm thẻ mục tiêu.')),
+    );
+  }
+
+  void _clearGoal() {
+    setState(() {
+      _goalNoteId = null;
+    });
+    _persist();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Đã hủy thẻ mục tiêu.')),
     );
   }
 
@@ -481,16 +516,26 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _showGoalDialog() async {
-    final goal = await showDialog<int>(
+    final goalNote = _goalNote;
+    if (goalNote == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nhấn giữ một thẻ để đặt làm mục tiêu.')),
+      );
+      return;
+    }
+    final target = await showDialog<int>(
       context: context,
       builder: (context) => _GoalDialog(
-        initialGoal: _goalTarget,
+        initialGoal: goalNote.goalTarget,
         themeColor: widget.themeColor,
       ),
     );
-    if (goal == null || !mounted) return;
+    if (target == null || !mounted) return;
     setState(() {
-      _goalTarget = goal;
+      final index = _notes.indexWhere((n) => n.id == goalNote.id);
+      if (index >= 0) {
+        _notes[index] = _notes[index].copyWith(goalTarget: target);
+      }
     });
     _persist();
   }
@@ -591,18 +636,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _openNoteMenu(Note note) {
     final isGoal = note.id == _goalNoteId;
-    final locked = _goalLocked && !isGoal;
-    final goalNote = _goalNote;
-
-    String subtitle;
-    if (isGoal) {
-      subtitle = 'Thẻ này đang là mục tiêu.';
-    } else if (locked && goalNote != null) {
-      subtitle =
-          'Cần đạt chỉ tiêu của "${_titleOf(goalNote)}" trước khi chọn thẻ khác.';
-    } else {
-      subtitle = 'Thanh chỉ tiêu phía trên sẽ đếm theo thẻ này.';
-    }
+    final subtitle = isGoal
+        ? 'Thanh chỉ tiêu đang đếm theo thẻ này. Chỉ tiêu: ${note.goalTarget} từ.'
+        : 'Chỉ tiêu: ${note.goalTarget} từ. Đặt làm mục tiêu để đếm theo thẻ này.';
 
     showModalBottomSheet<void>(
       context: context,
@@ -638,16 +674,20 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: 8),
               ListTile(
-                enabled: !isGoal && !locked,
                 leading: const Text('🐉', style: TextStyle(fontSize: 26)),
-                title: const Text('đặt thẻ này làm mục tiêu?',
-                    style: TextStyle(fontSize: 13, color: Colors.white)),
+                title: Text(
+                    isGoal ? 'hủy mục tiêu' : 'đặt thẻ này làm mục tiêu?',
+                    style: const TextStyle(fontSize: 13, color: Colors.white)),
                 subtitle: Text(subtitle,
                     style:
                         const TextStyle(fontSize: 11, color: Colors.white54)),
                 onTap: () {
                   Navigator.pop(sheetContext);
-                  _setGoal(note);
+                  if (isGoal) {
+                    _clearGoal();
+                  } else {
+                    _setGoal(note);
+                  }
                 },
               ),
               ListTile(
@@ -670,38 +710,45 @@ class _HomeScreenState extends State<HomeScreen> {
   // ---------- Soạn thảo ----------
 
   Future<void> _openEditor([Note? note]) async {
-    final isGoalNote = note != null && note.id == _goalNoteId;
+    final goalNote = (note != null && note.id == _goalNoteId) ? note : null;
+
     final result = await Navigator.of(context).push<Note>(
       MaterialPageRoute<Note>(
         builder: (context) => EditorScreen(
           note: note,
           themeColor: widget.themeColor,
-          goalTarget: isGoalNote ? _goalTarget : null,
+          goalTarget: goalNote?.goalTarget,
         ),
       ),
     );
+
     if (result == null || !mounted) return;
 
     var reachedGoal = false;
     setState(() {
       final index = _notes.indexWhere((n) => n.id == result.id);
       final oldWords = index >= 0 ? _notes[index].words : 0;
+
       if (index >= 0) {
         _notes[index] = result;
       } else {
         _notes.add(result);
       }
+
       if (result.words > oldWords) {
         _recordStreak(dateOnly(DateTime.now()));
       }
+
       if (result.id == _goalNoteId &&
-          oldWords < _goalTarget &&
-          result.words >= _goalTarget) {
+          oldWords < result.goalTarget &&
+          result.words >= result.goalTarget) {
         reachedGoal = true;
       }
+
       _sortNotes();
     });
     _persist();
+
     if (reachedGoal) _showRestReminder();
   }
 
@@ -766,7 +813,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildHeader() {
     final goal = _goalNote;
     final goalWords = goal?.words ?? 0;
-    final ratio = _goalTarget > 0 ? goalWords / _goalTarget : 0.0;
+    
+    final target = goal?.goalTarget ?? kDefaultGoal;
+    final ratio = target > 0 ? goalWords / target : 0.0;
     final progress = ratio > 1.0 ? 1.0 : ratio;
 
     final line1 = goal == null
@@ -774,7 +823,7 @@ class _HomeScreenState extends State<HomeScreen> {
         : '🐉 ${_titleOf(goal)}';
     final line2 = goal == null
         ? 'Nhấn giữ một thẻ để đặt làm mục tiêu'
-        : '$goalWords / $_goalTarget từ';
+        : '$goalWords / $target từ';
 
     return Row(
       children: [
@@ -899,7 +948,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     const listPadding = EdgeInsets.only(bottom: 88);
-
     if (_isGridMode) {
       return GridView.builder(
         padding: listPadding,
@@ -916,7 +964,6 @@ class _HomeScreenState extends State<HomeScreen> {
         },
       );
     }
-
     return ListView.builder(
       padding: listPadding,
       itemCount: notes.length,
@@ -929,7 +976,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildNoteCard(Note note, {Key? key}) {
     final isGoal = note.id == _goalNoteId;
-
     final contentText = Text(
       note.content.isEmpty ? '(Chưa có nội dung)' : previewText(note.content),
       maxLines: _isGridMode ? 3 : 4,
@@ -1004,7 +1050,7 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 Text(
                   isGoal
-                      ? '${note.words} / $_goalTarget từ'
+                      ? '${note.words} / ${note.goalTarget} từ'
                       : '${note.words} từ',
                   style: const TextStyle(color: Colors.white38, fontSize: 11),
                 ),
@@ -1097,9 +1143,9 @@ class _SoftBackground extends StatelessWidget {
 }
 
 // ================= HỘP THOẠI CHỈ TIÊU =================
+
 class _GoalDialog extends StatefulWidget {
   const _GoalDialog({required this.initialGoal, required this.themeColor});
-
   final int initialGoal;
   final Color themeColor;
 
@@ -1305,7 +1351,6 @@ class _StarMenuSheetState extends State<_StarMenuSheet> {
                       fontSize: 17,
                       fontWeight: FontWeight.bold)),
               const SizedBox(height: 20),
-
               // --- Điểm danh chuỗi ---
               Container(
                 padding: const EdgeInsets.all(14),
@@ -1329,7 +1374,6 @@ class _StarMenuSheetState extends State<_StarMenuSheet> {
                 ),
               ),
               const SizedBox(height: 12),
-
               // --- Thùng rác ---
               InkWell(
                 borderRadius: BorderRadius.circular(18),
@@ -1363,7 +1407,6 @@ class _StarMenuSheetState extends State<_StarMenuSheet> {
                 ),
               ),
               const SizedBox(height: 24),
-
               // --- Màu chủ đề ---
               const Text('Màu chủ đề',
                   style: TextStyle(color: Colors.white70, fontSize: 13)),
@@ -1395,7 +1438,6 @@ class _StarMenuSheetState extends State<_StarMenuSheet> {
                 }).toList(),
               ),
               const SizedBox(height: 28),
-
               // --- Xuất file ---
               const Text('Xuất file',
                   style: TextStyle(color: Colors.white70, fontSize: 13)),
@@ -1509,6 +1551,7 @@ class _StarMenuSheetState extends State<_StarMenuSheet> {
 }
 
 // ================= MÀN HÌNH THÙNG RÁC =================
+
 class TrashScreen extends StatefulWidget {
   const TrashScreen({
     super.key,
@@ -1681,6 +1724,7 @@ class _TrashScreenState extends State<TrashScreen> {
 }
 
 // ================= MÀN HÌNH SOẠN THẢO =================
+
 class EditorScreen extends StatefulWidget {
   const EditorScreen({
     super.key,
@@ -1691,7 +1735,7 @@ class EditorScreen extends StatefulWidget {
 
   final Note? note;
   final Color themeColor;
-
+  
   /// Chỉ tiêu của thẻ này nếu nó đang là thẻ mục tiêu (null = không phải).
   final int? goalTarget;
 
@@ -1717,6 +1761,7 @@ class _EditorScreenState extends State<EditorScreen> {
     final title = _titleController.text.trim();
     final old = widget.note;
     final Note note;
+
     if (old == null) {
       note = Note(
         id: DateTime.now().microsecondsSinceEpoch.toString(),
@@ -1737,6 +1782,7 @@ class _EditorScreenState extends State<EditorScreen> {
   @override
   Widget build(BuildContext context) {
     final target = widget.goalTarget;
+    
     return Scaffold(
       backgroundColor: const Color(0xFF08080A),
       appBar: AppBar(
@@ -1752,6 +1798,7 @@ class _EditorScreenState extends State<EditorScreen> {
             final text = target == null
                 ? '$words từ'
                 : '🐉 $words / $target từ';
+
             return Text(
               text,
               style: const TextStyle(fontSize: 14, color: Colors.white70),
