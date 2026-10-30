@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 void main() {
   runApp(const NovelApp());
@@ -908,18 +911,56 @@ class _StarMenuSheetState extends State<_StarMenuSheet> {
     return buffer.toString().trim();
   }
 
+  /// Loại bỏ các ký tự không hợp lệ trong tên file (/, \\, dấu hai chấm...).
+  String _sanitizeFileName(String raw) {
+    final cleaned = raw
+        .trim()
+        .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')
+        .replaceAll(RegExp(r'\s+'), '_');
+    return cleaned.isEmpty ? 'novel_app_export' : cleaned;
+  }
+
+  /// XUẤT FILE THẬT: trước đây chỉ sao chép vào clipboard vì dự án thiếu
+  /// gói ghi file. Giờ dùng path_provider để ghi file .txt/.md thật ra bộ
+  /// nhớ tạm của máy, rồi dùng share_plus mở hộp thoại chia sẻ của hệ
+  /// điều hành — từ đó người dùng có thể "Lưu vào Tệp" (Files/Drive),
+  /// gửi qua ứng dụng khác, hoặc AirDrop, giống như xuất file thật sự.
+  /// Nếu ghi/chia sẻ file thất bại (ví dụ thiếu quyền), vẫn dự phòng bằng
+  /// cách sao chép vào clipboard như cũ để không mất nội dung.
   Future<void> _exportNow() async {
     final text = _buildExportText();
-    await Clipboard.setData(ClipboardData(text: text));
-    if (!mounted) return;
-    final extension = _format == _ExportFormat.markdown ? '.md' : '.txt';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-            'Đã sao chép nội dung dạng $extension vào bộ nhớ tạm. Dán vào '
-            'ứng dụng ghi chú/trình soạn thảo rồi lưu thành file $extension.'),
-      ),
-    );
+    final extension = _format == _ExportFormat.markdown ? 'md' : 'txt';
+    final baseName = _exportNote == null
+        ? 'novel_app_${DateTime.now().millisecondsSinceEpoch}'
+        : _sanitizeFileName(
+            _exportNote!.title.isEmpty ? 'khong_co_tieu_de' : _exportNote!.title);
+    try {
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/$baseName.$extension');
+      await file.writeAsString(text);
+      if (!mounted) return;
+      final result = await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'text/plain')],
+        text: 'Xuất từ Novel App',
+      );
+      if (!mounted) return;
+      if (result.status == ShareResultStatus.success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Đã xuất file $baseName.$extension.')),
+        );
+      }
+    } catch (e) {
+      // Dự phòng: nếu không ghi/chia sẻ được file (thiếu quyền, thiết bị
+      // không hỗ trợ...), vẫn sao chép nội dung vào clipboard như bản cũ.
+      await Clipboard.setData(ClipboardData(text: text));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              'Không thể tạo file ($e). Đã sao chép nội dung vào bộ nhớ tạm thay thế.'),
+        ),
+      );
+    }
   }
 
   @override
@@ -1066,14 +1107,15 @@ class _StarMenuSheetState extends State<_StarMenuSheet> {
                   ),
                   onPressed: widget.notes.isEmpty ? null : _exportNow,
                   icon: const Icon(Icons.ios_share),
-                  label: const Text('Xuất & sao chép nội dung'),
+                  label: const Text('Xuất ra file'),
                 ),
               ),
               const SizedBox(height: 6),
               const Text(
-                'Lưu ý: app hiện sao chép nội dung đã định dạng vào bộ nhớ '
-                'tạm (clipboard) vì dự án chưa có gói ghi file (path_provider). '
-                'Dán vào ứng dụng bất kỳ rồi lưu lại là xong.',
+                'App sẽ tạo file .txt/.md thật rồi mở hộp thoại chia sẻ của '
+                'máy — bạn có thể lưu vào Tệp/Drive hoặc gửi qua ứng dụng '
+                'khác. Nếu máy không chia sẻ được, nội dung sẽ tự động được '
+                'sao chép vào bộ nhớ tạm để không bị mất.',
                 style: TextStyle(color: Colors.white38, fontSize: 11, height: 1.4),
               ),
             ],
@@ -1134,27 +1176,36 @@ class _EditorScreenState extends State<EditorScreen> {
   @override
   void initState() {
     super.initState();
-    // SỬA LỖI BỘ ĐẾM: tính lại số từ ngay khi mở màn hình, và đăng ký
-    // lắng nghe để tính lại mỗi khi nội dung thay đổi (trước đây số từ
-    // không được cập nhật theo từng ký tự gõ nên luôn hiển thị sai).
     _wordCount = countWords(stripFormattingMarkers(_contentController.text));
-    _contentController.addListener(_onContentChanged);
+    // SỬA LỖI BỘ ĐẾM (lần 2): lắng nghe trực tiếp trên controller (không
+    // chỉ qua onChanged của TextField) để số từ vẫn nhảy đúng cả khi nội
+    // dung bị đổi bằng nút trên thanh công cụ (in đậm, in nghiêng, gạch
+    // đầu dòng, hoàn tác...) — các nút đó gán thẳng vào
+    // `_contentController.value` chứ không phải do gõ phím, nên trước đây
+    // không kích hoạt việc đếm lại.
+    _contentController.addListener(_recountWords);
   }
 
   @override
   void dispose() {
     _historyDebounce?.cancel();
-    _contentController.removeListener(_onContentChanged);
+    _contentController.removeListener(_recountWords);
     _titleController.dispose();
     _contentController.dispose();
     super.dispose();
   }
 
-  void _onContentChanged() {
-    final newCount = countWords(stripFormattingMarkers(_contentController.text));
-    if (newCount != _wordCount) {
-      setState(() => _wordCount = newCount);
-    }
+  /// SỬA LỖI BỘ ĐẾM: luôn tính lại và cập nhật giao diện mỗi khi nội dung
+  /// đổi. Bản cũ chỉ setState khi "số mới khác số cũ" — khi gõ rất nhanh
+  /// hoặc khi bộ gõ tiếng Việt (Telex/VNI) gộp nhiều lần đổi trong một
+  /// khung hình, phép so sánh đó có thể bỏ lỡ một lần cập nhật khiến số
+  /// từ bị "đứng hình" không nhảy. Giờ luôn setState trực tiếp, không so
+  /// sánh, nên không còn trường hợp bị bỏ sót.
+  void _recountWords() {
+    if (!mounted) return;
+    setState(() {
+      _wordCount = countWords(stripFormattingMarkers(_contentController.text));
+    });
     _historyDebounce?.cancel();
     _historyDebounce = Timer(const Duration(milliseconds: 700), _pushHistory);
   }
@@ -1212,29 +1263,6 @@ class _EditorScreenState extends State<EditorScreen> {
         baseOffset: selection.start,
         extentOffset: selection.start + prefix.length + selected.length + suffix.length,
       ),
-    );
-  }
-
-  /// Thêm tiêu đề H1/H2 vào đầu dòng hiện tại (nơi có con trỏ).
-  void _applyHeading(String marker) {
-    _pushHistory();
-    final text = _contentController.text;
-    final offset = _contentController.selection.baseOffset < 0
-        ? text.length
-        : _contentController.selection.baseOffset;
-    var lineStart = text.lastIndexOf('\n', offset - 1) + 1;
-    if (lineStart < 0) lineStart = 0;
-
-    final lineEndSearch = text.indexOf('\n', lineStart);
-    final lineEnd = lineEndSearch == -1 ? text.length : lineEndSearch;
-    final line = text.substring(lineStart, lineEnd);
-    final cleanLine = line.replaceFirst(RegExp(r'^#{1,2}\s*'), '');
-    final newLine = '$marker $cleanLine';
-    final newText = text.replaceRange(lineStart, lineEnd, newLine);
-    final delta = newLine.length - line.length;
-    _contentController.value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: offset + delta),
     );
   }
 
@@ -1330,18 +1358,6 @@ class _EditorScreenState extends State<EditorScreen> {
           scrollDirection: Axis.horizontal,
           child: Row(
             children: [
-              _toolbarButton(
-                icon: Icons.title,
-                label: 'H1',
-                onTap: () => _applyHeading('#'),
-              ),
-              _toolbarButton(
-                icon: Icons.title,
-                label: 'H2',
-                iconSize: 16,
-                onTap: () => _applyHeading('##'),
-              ),
-              _toolbarDivider(),
               _toolbarButton(
                 icon: Icons.format_bold,
                 onTap: () => _wrapSelection('**'),
