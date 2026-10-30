@@ -5,7 +5,6 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:share_plus/share_plus.dart';
 
 void main() {
   runApp(const NovelApp());
@@ -901,27 +900,28 @@ class _StarMenuSheetState extends State<_StarMenuSheet> {
     return '$base.$_extension';
   }
 
-  /// Xuất ra FILE thật (.txt / .md) và mở bảng chia sẻ của hệ điều hành,
-  /// nơi người dùng chọn "Lưu vào Tệp / Drive / Zalo / Email...".
+  /// Xuất ra FILE thật (.txt / .md) vào thư mục Download của điện thoại.
+  /// Nếu máy không cho ghi vào đó thì tự động sao chép nội dung vào bộ nhớ tạm.
   Future<void> _exportFile() async {
     final text = _buildExportText();
     final fileName = _buildFileName();
-    final mime = _format == _ExportFormat.markdown
-        ? 'text/markdown'
-        : 'text/plain';
+    final messenger = ScaffoldMessenger.of(context);
     try {
-      final dir = await Directory.systemTemp.createTemp('novel_export');
+      final dir = Directory('/storage/emulated/0/Download');
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
+      }
       final file = File('${dir.path}/$fileName');
       await file.writeAsString(text, encoding: utf8);
-      await Share.shareXFiles(
-        [XFile(file.path, mimeType: mime, name: fileName)],
-        subject: fileName,
+      messenger.showSnackBar(
+        SnackBar(content: Text('Đã lưu file vào thư mục Download: $fileName')),
       );
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      await Clipboard.setData(ClipboardData(text: text));
+      messenger.showSnackBar(
         const SnackBar(
-          content: Text('Không xuất được file. Bạn thử nút "Sao chép" nhé.'),
+          content: Text(
+              'Máy không cho lưu file trực tiếp. Đã sao chép nội dung vào bộ nhớ tạm, bạn dán vào ghi chú rồi lưu nhé.'),
         ),
       );
     }
@@ -1102,8 +1102,8 @@ class _StarMenuSheetState extends State<_StarMenuSheet> {
               ),
               const SizedBox(height: 8),
               const Text(
-                'Sau khi bấm "Xuất file", chọn nơi lưu trong bảng chia sẻ '
-                '(Lưu vào Tệp, Google Drive, Zalo, Email...).',
+                'Bấm "Xuất file" để lưu file vào thư mục Download. Nếu máy không '
+                'cho phép, nội dung sẽ được sao chép vào bộ nhớ tạm.',
                 style:
                     TextStyle(color: Colors.white38, fontSize: 11, height: 1.4),
               ),
