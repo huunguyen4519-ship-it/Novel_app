@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -910,10 +910,11 @@ class _StarMenuSheetState extends State<_StarMenuSheet> {
         ? 'text/markdown'
         : 'text/plain';
     try {
-      final bytes = Uint8List.fromList(utf8.encode(text));
+      final dir = await Directory.systemTemp.createTemp('novel_export');
+      final file = File('${dir.path}/$fileName');
+      await file.writeAsString(text, encoding: utf8);
       await Share.shareXFiles(
-        [XFile.fromData(bytes, mimeType: mime, name: fileName)],
-        fileNameOverrides: [fileName],
+        [XFile(file.path, mimeType: mime, name: fileName)],
         subject: fileName,
       );
     } catch (e) {
